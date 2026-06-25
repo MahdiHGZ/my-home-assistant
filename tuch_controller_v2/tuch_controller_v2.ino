@@ -130,6 +130,25 @@ bool darkTheme = true;
 // auto-generates prototypes before the first function definition, so no
 // function may precede enum Page / struct Btn / etc. (only data may).
 
+// Compact HTML-inspired dark UI palette. Kept as RGB565 constants so the page
+// renderer stays cheap on the ESP32/ILI9341.
+#define UI_BG       0x0841
+#define UI_BG2      0x0000
+#define UI_PANEL    0x1082
+#define UI_PANEL_HI 0x18C3
+#define UI_BORDER   0x2124
+#define UI_BORDER_2 0x39E7
+#define UI_TEXT     0xF7BE
+#define UI_MUTED    0x7BEF
+#define UI_DIM      0x4A69
+#define UI_SKY      0x24BF
+#define UI_EMERALD  0x366D
+#define UI_AMBER    0xFDA0
+#define UI_ROSE     0xF9AB
+#define UI_PINK     0xF8CF
+#define UI_PURPLE   0xA25F
+#define UI_ZINC     0x632C
+
 // --- Display (backlight) brightness, user-set on SETUP, persisted in NVS ----
 #define DISP_BRIGHT_MIN 30       // never let "on" go fully dark
 uint8_t dispBrightDuty = BL_DUTY_FULL;
@@ -325,10 +344,16 @@ volatile bool workerBusy = false;
 // for Arduino's auto-prototypes; the palette data lives near the top).
 // --------------------------------------------------
 void applyTheme(bool dark) {
-  const ThemePalette& t = dark ? THEME_DARK : THEME_LIGHT;
-  COL_BG = t.bg; COL_CARD = t.card; COL_CARD_HI = t.cardHi; COL_EDGE = t.edge;
-  COL_TEXT = t.text; COL_DIM = t.dim; COL_ACCENT = t.accent; COL_OK = t.ok;
-  COL_ERR = t.err; COL_WARM = t.warm; COL_SUB = t.sub; COL_OFFLINE = t.offline;
+  if (dark) {
+    COL_BG = UI_BG; COL_CARD = UI_PANEL; COL_CARD_HI = UI_PANEL_HI; COL_EDGE = UI_BORDER;
+    COL_TEXT = UI_TEXT; COL_DIM = UI_MUTED; COL_ACCENT = UI_SKY; COL_OK = UI_EMERALD;
+    COL_ERR = UI_ROSE; COL_WARM = UI_AMBER; COL_SUB = UI_MUTED; COL_OFFLINE = UI_ROSE;
+  } else {
+    const ThemePalette& t = THEME_LIGHT;
+    COL_BG = t.bg; COL_CARD = t.card; COL_CARD_HI = t.cardHi; COL_EDGE = t.edge;
+    COL_TEXT = t.text; COL_DIM = t.dim; COL_ACCENT = t.accent; COL_OK = t.ok;
+    COL_ERR = t.err; COL_WARM = t.warm; COL_SUB = t.sub; COL_OFFLINE = t.offline;
+  }
   darkTheme = dark;
 }
 
@@ -440,7 +465,7 @@ uint16_t blend565(uint16_t fg, uint16_t bg, uint8_t a) {
 static inline uint16_t glassTintColor() { return darkTheme ? 0xFFFF : 0x18E3; }
 static inline uint16_t frostFill()      { return blend565(glassTintColor(), COL_BG, 16); }
 static inline uint16_t frostFillHi()    { return blend565(glassTintColor(), COL_BG, 34); }
-static inline uint16_t glassEdge()      { return blend565(glassTintColor(), COL_BG, 52); }
+static inline uint16_t glassEdge()      { return blend565(glassTintColor(), COL_BG, 36); }
 
 // Frosted body color at vertical offset `dy` within a panel of height `h`.
 // The frost is nearly uniform (a clean translucent sheet) with only a hint of
@@ -524,14 +549,9 @@ void glassErase(int16_t x, int16_t y, int16_t w, int16_t h,
 // need a flat erase still use COL_BG; only full page draws use this.
 // --------------------------------------------------
 uint16_t bgRowColor(int16_t y) {
-  uint16_t alive = tft.color565(aliveR, aliveG, aliveB);
-  // A bulb-color hint everywhere, a big glow from the top (behind the island)
-  // and a softer one from the bottom — clearly colored, navy still the base.
-  int top = (y < 150) ? (150 - y) * 80 / 150 : 0;
-  int bot = (y > SCREEN_H - 100) ? (y - (SCREEN_H - 100)) * 46 / 100 : 0;
-  int a = 16 + (top + bot) * aliveLvl / 100;
-  if (a > 110) a = 110;
-  return blend565(alive, COL_BG, (uint8_t)a);
+  int a = 24 - (int)y * 18 / SCREEN_H;
+  if (a < 0) a = 0;
+  return blend565(0x2104, UI_BG2, (uint8_t)a);
 }
 
 void drawBackground() {
@@ -653,6 +673,15 @@ void iconDots(int16_t cx, int16_t cy, uint16_t color) {
   tft.fillCircle(cx + 10, cy, 3, color);
 }
 
+void iconDice(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
+  tft.fillRoundRect(cx - 13, cy - 13, 26, 26, 5, color);
+  tft.fillCircle(cx - 6, cy - 6, 2, bg);
+  tft.fillCircle(cx + 6, cy - 6, 2, bg);
+  tft.fillCircle(cx,     cy,     2, bg);
+  tft.fillCircle(cx - 6, cy + 6, 2, bg);
+  tft.fillCircle(cx + 6, cy + 6, 2, bg);
+}
+
 void iconCamera(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
   tft.fillRoundRect(cx - 13, cy - 8, 26, 18, 3, color);
   tft.fillRect(cx - 5, cy - 12, 10, 4, color);   // top hump
@@ -721,11 +750,11 @@ void drawLeftText(const char* text, int16_t x, int16_t y, uint8_t size, uint16_t
 // The island is a tab that hangs from the top wall: its top edge is flush with
 // y=0 (the top "cut it off"), only the BOTTOM corners are rounded — like a
 // notch bulging down into the screen.
-#define ISL_X 80
+#define ISL_X 90
 #define ISL_Y 0
-#define ISL_W 160
-#define ISL_H 34
-#define ISL_R 16
+#define ISL_W 140
+#define ISL_H 24
+#define ISL_R 10
 #define ISL_CX (ISL_X + ISL_W / 2)
 #define ISL_CY (ISL_Y + ISL_H / 2)
 
@@ -751,50 +780,49 @@ const char* pageTitle() {
 
 // The two status dots inside the island (cheap, redrawn often).
 void islandDots() {
-  tft.fillCircle(ISL_X + 16, ISL_CY, 4, connColor());     // connection, left
+  tft.fillCircle(ISL_X + 11, ISL_CY, 3, connColor());     // connection, left
+  tft.drawCircle(ISL_X + 22, ISL_CY + 3, 5, connColor());
+  tft.drawCircle(ISL_X + 22, ISL_CY + 3, 3, connColor());
+  tft.fillCircle(ISL_X + 22, ISL_CY + 5, 1, connColor());
   bool busy = workerBusy || (apiQueue && uxQueueMessagesWaiting(apiQueue) > 0);
-  tft.fillCircle(ISL_X + ISL_W - 16, ISL_CY, 4, busy ? COL_ACCENT : 0x0000);
+  uint16_t rc = busy ? COL_ACCENT : UI_DIM;
+  int16_t bx = ISL_X + ISL_W - 55;
+  tft.drawRect(bx, ISL_CY - 4, 14, 8, rc);
+  tft.fillRect(bx + 2, ISL_CY - 2, 10, 4, rc);
+  tft.fillRect(bx + 15, ISL_CY - 2, 2, 4, rc);
+  drawLeftText("100%", bx + 22, ISL_CY - 4, 1, UI_MUTED);
 }
 
 // Replace just the central text of the island (keeps the shell + dots).
 // size 2 = bold font for the clock/title; size 1 = small, for longer toasts.
 void islandText(const char* msg, uint16_t color, uint8_t size) {
-  tft.fillRect(ISL_X + 26, ISL_Y + 2, ISL_W - 52, ISL_H - 4, 0x0000);
+  tft.fillRect(ISL_X + 36, ISL_Y + 2, ISL_W - 78, ISL_H - 4, 0x0000);
   drawCenteredText(msg, ISL_CX, ISL_CY, size, color);
 }
 
 // Resting content: clock on MAIN, page title elsewhere (bold).
 void islandDefault() {
   char clk[8];
-  if (currentPage == PAGE_MAIN && currentClock(clk, sizeof(clk))) islandText(clk, COL_TEXT, 2);
-  else islandText(pageTitle(), COL_TEXT, 2);
+  if (!currentClock(clk, sizeof(clk))) strlcpy(clk, "00:--", sizeof(clk));
+  islandText(clk, COL_TEXT, 1);
 }
 
 // The matte-black tab shell: flat top edge (flush with the screen top), only
 // the bottom corners rounded, with a soft rim down the sides + bottom arc.
 void islandShell() {
-  const int16_t cyc = ISL_H - 1 - ISL_R;   // row where bottom rounding begins
-  for (int16_t y = 0; y < ISL_H; y++) {
-    int16_t ins = 0;
-    if (y > cyc) {
-      int16_t ry = y - cyc;
-      int32_t v = (int32_t)ISL_R * ISL_R - (int32_t)ry * ry;
-      if (v < 0) v = 0;
-      ins = ISL_R - (int16_t)(sqrtf((float)v) + 0.5f);
-    }
-    tft.drawFastHLine(ISL_X + ins, ISL_Y + y, ISL_W - 2 * ins, 0x0000);
-  }
-  uint16_t rim = blend565(0xFFFF, COL_BG, 45);
-  tft.drawFastVLine(ISL_X, ISL_Y, cyc + 1, rim);
-  tft.drawFastVLine(ISL_X + ISL_W - 1, ISL_Y, cyc + 1, rim);
-  for (int16_t y = cyc + 1; y < ISL_H; y++) {
-    int16_t ry = y - cyc;
+  tft.fillRect(ISL_X, ISL_Y, ISL_W, ISL_H - ISL_R, 0x0000);
+  tft.fillRoundRect(ISL_X, ISL_Y, ISL_W, ISL_H, ISL_R, 0x0000);
+  tft.fillRect(ISL_X, ISL_Y, ISL_W, ISL_R, 0x0000);
+  tft.drawFastVLine(ISL_X, ISL_Y, ISL_H - ISL_R, UI_BORDER);
+  tft.drawFastVLine(ISL_X + ISL_W - 1, ISL_Y, ISL_H - ISL_R, UI_BORDER);
+  for (int16_t y = ISL_H - ISL_R; y < ISL_H; y++) {
+    int16_t ry = y - (ISL_H - ISL_R);
     int32_t v = (int32_t)ISL_R * ISL_R - (int32_t)ry * ry;
-    if (v < 0) v = 0;
-    int16_t ins = ISL_R - (int16_t)(sqrtf((float)v) + 0.5f);
-    tft.drawPixel(ISL_X + ins, ISL_Y + y, rim);
-    tft.drawPixel(ISL_X + ISL_W - 1 - ins, ISL_Y + y, rim);
+    int16_t ins = ISL_R - (int16_t)(sqrtf((float)max((int32_t)0, v)) + 0.5f);
+    tft.drawPixel(ISL_X + ins, ISL_Y + y, UI_BORDER);
+    tft.drawPixel(ISL_X + ISL_W - 1 - ins, ISL_Y + y, UI_BORDER);
   }
+  tft.drawFastHLine(ISL_X + ISL_R, ISL_Y + ISL_H - 1, ISL_W - 2 * ISL_R, UI_BORDER);
 }
 
 // Full island repaint (on a page draw): tab shell, dots, content.
@@ -825,6 +853,18 @@ void drawToastAlarm(const char* msg) {
   islandText(msg, COL_ERR, 1);
   errorSticky = true;
   toastHoldUntil = millis() + TOAST_HOLD_MS;
+}
+
+void drawConnStatusToast() {
+  if (!ENABLE_WIFI) {
+    drawToast("wifi disabled", COL_DIM);
+  } else if (WiFi.status() != WL_CONNECTED) {
+    drawToastAlarm("no wifi");
+  } else if (!sseClient.connected()) {
+    drawToast("wifi only", COL_WARM);
+  } else {
+    drawToast("wifi + stream", COL_OK);
+  }
 }
 
 // --------------------------------------------------
@@ -879,24 +919,35 @@ static int16_t prevBrFillW = -1;  // last painted fill width, for diff updates
 void drawGradientBar(Btn& b, int pct, bool pressed) {
   int16_t fillW = (int32_t)b.w * pct / 100;
   int16_t r = barR(b);
-  tft.fillRoundRect(b.x, b.y, b.w, b.h, r, pressed ? frostFillHi() : frostFill());
-  brightSpan(b, 1, b.w - 1, fillW);
-  tft.drawRoundRect(b.x, b.y, b.w, b.h, r, glassEdge());
-  brightLabel(b, fillW, pct);
+  uint16_t accent = (b.id == ID_SET_BRIGHT) ? UI_SKY : UI_AMBER;
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, 12, pressed ? UI_PANEL_HI : UI_PANEL);
+  if (fillW > 0) {
+    int16_t fw = constrain(fillW, 1, b.w);
+    tft.fillRoundRect(b.x, b.y, fw, b.h, 12, blend565(accent, UI_PANEL, 48));
+    if (fw < b.w - 1) tft.drawFastVLine(b.x + fw, b.y + 5, b.h - 10, blend565(accent, UI_BG, 80));
+  }
+  tft.drawRoundRect(b.x, b.y, b.w, b.h, 12, UI_BORDER);
+
+  const char* name = (b.id == ID_SET_BRIGHT) ? "DISPLAY BACKLIGHT" : "BRIGHTNESS";
+  if (b.id == ID_SET_BRIGHT) {
+    tft.drawRect(b.x + 13, b.y + 12, 14, 10, accent);
+    tft.drawFastHLine(b.x + 17, b.y + 27, 6, accent);
+    tft.drawFastVLine(b.x + 20, b.y + 22, 5, accent);
+    drawLeftText(name, b.x + 36, b.y + b.h / 2 - 4, 1, accent);
+  } else {
+    iconSun(b.x + 20, b.y + b.h / 2, accent);
+    drawLeftText(name, b.x + 50, b.y + b.h / 2 - 4, 1, accent);
+  }
+  char s[8];
+  snprintf(s, sizeof(s), "%d%%", pct);
+  drawCenteredText(s, b.x + b.w - 24, b.y + b.h / 2, 1, UI_TEXT);
   prevBrFillW = fillW;
 }
 
 // Diff-only update while dragging: repaint just the columns between the old
 // and new fill width, plus the label — no full-bar fillRoundRect. (§6.2)
 void updateGradientBar(Btn& b, int pct) {
-  int16_t fillW = (int32_t)b.w * pct / 100;
-  if (prevBrFillW < 0) { drawGradientBar(b, pct, true); return; }
-  if (fillW != prevBrFillW) {
-    int16_t lo = min(prevBrFillW, fillW) - 1, hi = max(prevBrFillW, fillW) + 1;
-    brightSpan(b, lo, hi, fillW);
-  }
-  brightLabel(b, fillW, pct);
-  prevBrFillW = fillW;
+  drawGradientBar(b, pct, true);
 }
 
 // Bulb brightness uses the shared bar driven by curBrightness.
@@ -905,30 +956,33 @@ void updateBrightnessBar(Btn& b) { updateGradientBar(b, curBrightness); }
 
 // --- saturation bar (COLOR page): white (left) -> full hue (right) (§5.4) ---
 void drawSatColumns(Btn& b, int16_t px0, int16_t px1) {
-  px0 = constrain(px0, 0, (int16_t)(b.w - 1));
-  px1 = constrain(px1, 0, (int16_t)(b.w - 1));
+  const int16_t ix = b.x + 4, iy = b.y + 5, iw = b.w - 8, ih = b.h - 10;
+  const int16_t r = ih / 2;
+  px0 = constrain(px0, 0, (int16_t)(iw - 1));
+  px1 = constrain(px1, 0, (int16_t)(iw - 1));
   for (int16_t px = px0; px <= px1; px++) {
-    tft.drawFastVLine(b.x + px, b.y, b.h, hsvTo565(curHue, (int32_t)px * 100 / b.w));
+    int16_t ins = roundInset(px, iw, r);
+    tft.drawFastVLine(ix + px, iy + ins, ih - 2 * ins, hsvTo565(curHue, (int32_t)px * 100 / iw));
   }
 }
 
 void drawSatMarker(Btn& b) {
-  int16_t mx = b.x + (int32_t)curSat * b.w / 100;
-  mx = constrain(mx, (int16_t)(b.x + 1), (int16_t)(b.x + b.w - 2));
-  tft.fillRect(mx - 2, b.y, 5, b.h, COL_TEXT);
-  tft.fillRect(mx - 1, b.y + 2, 3, b.h - 4, hsvTo565(curHue, curSat));
+  const int16_t ix = b.x + 4, iy = b.y + 5, iw = b.w - 8, ih = b.h - 10;
+  int16_t mx = ix + (int32_t)curSat * iw / 100;
+  mx = constrain(mx, (int16_t)(ix + 1), (int16_t)(ix + iw - 2));
+  tft.fillRect(mx - 2, iy - 2, 5, ih + 4, COL_TEXT);
+  tft.fillRect(mx - 1, iy, 3, ih, hsvTo565(curHue, curSat));
 }
 
 void drawSatBar(Btn& b) {
-  drawSatColumns(b, 0, b.w - 1);
-  tft.drawRoundRect(b.x - 1, b.y - 1, b.w + 2, b.h + 2, 4, glassEdge());
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, b.h / 2, UI_PANEL);
+  tft.drawRoundRect(b.x, b.y, b.w, b.h, b.h / 2, UI_BORDER);
+  drawSatColumns(b, 0, b.w - 9);
   drawSatMarker(b);
 }
 
 void moveSatMarker(Btn& b, int oldSat) {
-  int16_t ox = b.x + (int32_t)oldSat * b.w / 100;
-  drawSatColumns(b, ox - b.x - 3, ox - b.x + 3);
-  drawSatMarker(b);
+  drawSatBar(b);
 }
 
 // --- display backlight brightness bar (SETUP page) --------------------------
@@ -943,43 +997,46 @@ void drawDispBrightBar(Btn& b, bool pressed) {
 }
 
 void drawHueColumns(Btn& b, int16_t px0, int16_t px1) {
-  px0 = constrain(px0, 0, (int16_t)(b.w - 1));
-  px1 = constrain(px1, 0, (int16_t)(b.w - 1));
+  const int16_t ix = b.x + 4, iy = b.y + 5, iw = b.w - 8, ih = b.h - 10;
+  const int16_t r = ih / 2;
+  px0 = constrain(px0, 0, (int16_t)(iw - 1));
+  px1 = constrain(px1, 0, (int16_t)(iw - 1));
   for (int16_t px = px0; px <= px1; px++) {
-    tft.drawFastVLine(b.x + px, b.y, b.h, hueTo565((int32_t)px * 360 / b.w));
+    int16_t ins = roundInset(px, iw, r);
+    tft.drawFastVLine(ix + px, iy + ins, ih - 2 * ins, hueTo565((int32_t)px * 360 / iw));
   }
 }
 
 void drawHueMarker(Btn& b) {
-  int16_t mx = b.x + (int32_t)curHue * b.w / 360;
-  mx = constrain(mx, (int16_t)(b.x + 1), (int16_t)(b.x + b.w - 2));
-  tft.fillRect(mx - 2, b.y, 5, b.h, COL_TEXT);
-  tft.fillRect(mx - 1, b.y + 3, 3, b.h - 6, hueTo565(curHue));
+  const int16_t ix = b.x + 4, iy = b.y + 5, iw = b.w - 8, ih = b.h - 10;
+  int16_t mx = ix + (int32_t)curHue * iw / 360;
+  mx = constrain(mx, (int16_t)(ix + 1), (int16_t)(ix + iw - 2));
+  tft.fillRect(mx - 2, iy - 2, 5, ih + 4, COL_TEXT);
+  tft.fillRect(mx - 1, iy, 3, ih, hueTo565(curHue));
 }
 
 void drawHueBar(Btn& b) {
-  drawHueColumns(b, 0, b.w - 1);
-  tft.drawRoundRect(b.x - 1, b.y - 1, b.w + 2, b.h + 2, 6, glassEdge());
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, b.h / 2, UI_PANEL);
+  tft.drawRoundRect(b.x, b.y, b.w, b.h, b.h / 2, UI_BORDER);
+  drawHueColumns(b, 0, b.w - 9);
   drawHueMarker(b);
 }
 
 void moveHueMarker(Btn& b, int oldHue) {
-  int16_t ox = b.x + (int32_t)oldHue * b.w / 360;
-  drawHueColumns(b, ox - b.x - 3, ox - b.x + 3);
-  drawHueMarker(b);
+  drawHueBar(b);
 }
 
 void drawColorPreview() {
   uint8_t r, g, b;
   hsvToRgb(curHue, curSat, r, g, b);
-  const int16_t X = 5, Y = 166, W = 100, H = 66;
-  tft.fillRoundRect(X, Y, W, H, 16, tft.color565(r, g, b));
-  tft.drawRoundRect(X, Y, W, H, 16, glassEdge());
+  const int16_t X = 12, Y = 183, W = 68, H = 40;
+  tft.fillRoundRect(X, Y, W, H, 9, tft.color565(r, g, b));
+  tft.drawRoundRect(X, Y, W, H, 9, UI_BORDER_2);
   char hex[10];
   snprintf(hex, sizeof(hex), "#%02X%02X%02X", r, g, b);
   // Dark text on light swatches, light text on dark — stays legible.
   uint16_t txt = (r + g + b > 384) ? COL_BG : COL_TEXT;
-  drawCenteredText(hex, X + W / 2, Y + H - 12, 1, txt);
+  drawCenteredText(hex, X + W / 2, Y + H / 2, 1, txt);
 }
 
 void cardSubText(Btn& b, const char* text, uint16_t color) {
@@ -990,7 +1047,7 @@ void cardSubText(Btn& b, const char* text, uint16_t color) {
 void drawCardSub(Btn& b) {
   char sub[20];
   if (b.id == ID_SCENE_NIGHT) {  // static scene description, no data needed
-    cardSubText(b, "off+dock+sleep", COL_DIM);
+    cardSubText(b, "good night", COL_DIM);
     return;
   }
   if (!st.valid) {
@@ -1035,10 +1092,305 @@ void drawCardSub(Btn& b) {
       }
       return;
     case ID_NAV_SET:
-      snprintf(sub, sizeof(sub), "screen %lus", offAfterMs / 1000);
+      snprintf(sub, sizeof(sub), "sleep %lus", offAfterMs / 1000);
       cardSubText(b, sub, COL_SUB);
       return;
   }
+}
+
+static inline uint16_t uiPanelFill(bool pressed) {
+  return pressed ? UI_PANEL_HI : UI_PANEL;
+}
+
+static inline uint16_t uiTint(uint16_t color, uint8_t a) {
+  return blend565(color, UI_BG, a);
+}
+
+void softPanel(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r,
+               uint16_t border, uint16_t fill) {
+  tft.fillRoundRect(x, y, w, h, r, fill);
+  tft.drawRoundRect(x, y, w, h, r, border);
+}
+
+void drawBottomIndicator() {
+  tft.fillRoundRect(136, 236, 48, 2, 1, blend565(0xFFFF, UI_BG, 45));
+}
+
+const char* headerTitle() {
+  switch (currentPage) {
+    case PAGE_LIGHTS: return "LIGHTS";
+    case PAGE_MODES:  return "LIGHT MODES";
+    case PAGE_COLOR:  return "SPECTRUM HUE";
+    case PAGE_VACUUM: return "ROBOVACUUM";
+    case PAGE_AIR:    return "AIR CLIMATE";
+    case PAGE_CAM:    return "SMART VIEWFINDER";
+    case PAGE_SET:    return "SYSTEM SETTINGS";
+    default:          return "";
+  }
+}
+
+void drawPageHeader() {
+  if (currentPage == PAGE_MAIN) {
+    tft.drawTriangle(14, 39, 21, 32, 28, 39, UI_SKY);
+    tft.drawRect(17, 39, 8, 7, UI_SKY);
+    drawLeftText("MAHDIHOME", 34, 36, 1, UI_DIM);
+    drawLeftText(serverReachable ? "Panel Online" : "Panel Offline", 238, 36, 1,
+                 serverReachable ? UI_DIM : UI_ROSE);
+    return;
+  }
+  drawCenteredText(headerTitle(), 160, 49, 1, UI_DIM);
+}
+
+uint16_t modeAccent(int id) {
+  switch (id) {
+    case ID_MODE0: return UI_SKY;
+    case ID_MODE1: return UI_AMBER;
+    case ID_MODE2: return UI_ROSE;
+    case ID_MODE3: return UI_PURPLE;
+    case ID_MODE4: return UI_PINK;
+    case ID_MODE5: return UI_SKY;
+    default:       return UI_SKY;
+  }
+}
+
+void drawDashboardTile(Btn& b, bool pressed) {
+  uint16_t accent = UI_SKY;
+  const char* name = b.label;
+  char value[24] = "";
+  bool glow = false;
+
+  switch (b.id) {
+    case ID_NAV_LIGHTS:
+      accent = UI_PINK; glow = st.valid && st.lightsAvail && st.bulbsOn > 0;
+      if (st.valid && st.lightsAvail) snprintf(value, sizeof(value), "%d/%d on", st.bulbsOn, st.bulbsTotal);
+      else strlcpy(value, st.valid ? "offline" : "syncing", sizeof(value));
+      break;
+    case ID_NAV_VACUUM:
+      accent = UI_SKY;
+      if (st.valid && st.vacAvail) strlcpy(value, st.vacStatus[0] ? st.vacStatus : "ready", sizeof(value));
+      else strlcpy(value, st.valid ? "offline" : "syncing", sizeof(value));
+      break;
+    case ID_NAV_AIR:
+      accent = UI_EMERALD; name = "PURIFIER"; glow = st.valid && st.purAvail && st.purOn;
+      if (st.valid && st.purAvail && st.pm25 >= 0) snprintf(value, sizeof(value), "%d ug/m3", st.pm25);
+      else strlcpy(value, st.valid ? "offline" : "syncing", sizeof(value));
+      break;
+    case ID_NAV_CAM:
+      accent = UI_PURPLE;
+      if (st.moments >= 0) snprintf(value, sizeof(value), "%d saved", st.moments);
+      else strlcpy(value, "capture", sizeof(value));
+      break;
+    case ID_NAV_SET:
+      accent = UI_ZINC; name = "SETTINGS";
+      snprintf(value, sizeof(value), "%lus sleep", offAfterMs / 1000);
+      break;
+    case ID_SCENE_NIGHT:
+      accent = UI_ZINC;
+      strlcpy(value, "Standby", sizeof(value));
+      break;
+  }
+
+  uint16_t border = glow ? uiTint(accent, 95) : UI_BORDER;
+  uint16_t fill = pressed ? UI_PANEL_HI : uiTint(0xFFFF, 7);
+  softPanel(b.x, b.y, b.w, b.h, 12, border, fill);
+
+  int16_t ix = b.x + 22, iy = b.y + 25;
+  switch (b.id) {
+    case ID_NAV_LIGHTS: iconBulb(ix, iy, accent); break;
+    case ID_NAV_VACUUM: iconVacuum(ix, iy, accent); break;
+    case ID_NAV_AIR: iconSun(ix, iy, accent); break;
+    case ID_NAV_CAM: iconCamera(ix, iy, accent, fill); break;
+    case ID_NAV_SET: iconGear(ix, iy, UI_MUTED, fill); break;
+    case ID_SCENE_NIGHT:
+      tft.fillCircle(ix, iy, 10, UI_ZINC);
+      tft.fillCircle(ix + 6, iy - 4, 10, fill);
+      break;
+  }
+  if (b.id == ID_NAV_VACUUM && st.vacBattery >= 0) {
+    char bat[6];
+    snprintf(bat, sizeof(bat), "%d%%", st.vacBattery);
+    softPanel(b.x + b.w - 34, b.y + 10, 26, 10, 3, uiTint(UI_SKY, 45), uiTint(UI_SKY, 20));
+    drawCenteredText(bat, b.x + b.w - 21, b.y + 15, 1, UI_SKY);
+  } else if (b.id == ID_NAV_LIGHTS || b.id == ID_NAV_AIR || b.id == ID_NAV_CAM || b.id == ID_SCENE_NIGHT) {
+    tft.fillCircle(b.x + b.w - 13, b.y + 13, 3, glow ? accent : UI_BORDER);
+  }
+
+  drawLeftText(name, b.x + 8, b.y + b.h - 28, 1, UI_DIM);
+  drawLeftText(value, b.x + 8, b.y + b.h - 14, 1,
+               (b.id == ID_NAV_AIR && glow) ? UI_EMERALD : UI_TEXT);
+}
+
+void drawCompactButton(Btn& b, const char* text, uint16_t accent, bool pressed, bool active) {
+  uint16_t border = active ? uiTint(accent, 105) : UI_BORDER;
+  uint16_t fill = active ? uiTint(accent, 28) : uiPanelFill(pressed);
+  softPanel(b.x, b.y, b.w, b.h, (b.h >= 44) ? 12 : 9, border, fill);
+  drawCenteredText(text, b.x + b.w / 2, b.y + b.h / 2, 1, active ? accent : UI_TEXT);
+}
+
+bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
+  int16_t cx = b.x + b.w / 2;
+  int16_t cy = b.y + b.h / 2;
+  uint16_t accent = selected ? COL_ACCENT : UI_SKY;
+
+  if (b.id == ID_BACK) {
+    softPanel(b.x, b.y, b.w, b.h, 12, UI_BORDER_2, uiPanelFill(pressed));
+    iconBack(cx, cy, UI_TEXT);
+    return true;
+  }
+  if (currentPage == PAGE_MAIN) {
+    drawDashboardTile(b, pressed);
+    return true;
+  }
+  if (b.id == ID_PUR_POWER) {
+    uint16_t pc = st.purOn ? UI_EMERALD : UI_ROSE;
+    softPanel(b.x, b.y, b.w, b.h, 12, uiTint(pc, 90), uiTint(pc, pressed ? 48 : 28));
+    iconPower(cx, cy, pc, uiTint(pc, 28));
+    return true;
+  }
+
+  if (currentPage == PAGE_LIGHTS) {
+    if (b.id == ID_MODE5 || b.id == ID_MODE4 || b.id == ID_MORE) {
+      uint16_t c = (b.id == ID_MODE4) ? UI_ROSE : (b.id == ID_MODE5 ? UI_SKY : UI_MUTED);
+      softPanel(b.x, b.y, b.w, b.h, 12, selected ? uiTint(c, 105) : UI_BORDER,
+                selected ? uiTint(c, 28) : uiPanelFill(pressed));
+      if (b.id == ID_MODE5) iconPlay(b.x + 25, cy, c);
+      else if (b.id == ID_MODE4) iconHeart(b.x + 25, cy, c);
+      else iconDots(b.x + 25, cy, c);
+      drawLeftText(label, b.x + 44, cy - 4, 1, UI_TEXT);
+      return true;
+    }
+    if (b.id == ID_COLOR_PAGE) {
+      softPanel(b.x, b.y, b.w, b.h, 12, UI_BORDER, uiPanelFill(pressed));
+      drawLeftText("SPECTRUM COLOR", b.x + 14, b.y + 16, 1, UI_DIM);
+      uint8_t r, g, bl;
+      hsvToRgb(curHue, curSat, r, g, bl);
+      char hex[10];
+      snprintf(hex, sizeof(hex), "#%02X%02X%02X", r, g, bl);
+      drawLeftText(hex, b.x + b.w - 78, b.y + 16, 1, UI_TEXT);
+      tft.fillCircle(b.x + b.w - 22, cy, 10, tft.color565(r, g, bl));
+      tft.drawCircle(b.x + b.w - 22, cy, 10, UI_BORDER_2);
+      return true;
+    }
+    if (b.id == ID_BR_OFF) {
+      softPanel(b.x, b.y, b.w, b.h, 12, uiTint(UI_AMBER, 100), uiTint(UI_AMBER, pressed ? 58 : 34));
+      iconPower(cx, cy, UI_AMBER, uiTint(UI_AMBER, 34));
+      return true;
+    }
+  }
+
+  if (currentPage == PAGE_MODES && b.id >= ID_MODE0 && b.id <= ID_MODE5) {
+    uint16_t c = modeAccent(b.id);
+    drawCompactButton(b, MODE_LABELS[b.id - ID_MODE0], c, pressed, selected);
+    return true;
+  }
+
+  if (currentPage == PAGE_COLOR) {
+    if (b.id == ID_MODE0 || b.id == ID_MODE1) {
+      uint16_t c = (b.id == ID_MODE1) ? UI_AMBER : UI_SKY;
+      drawCompactButton(b, label, c, pressed, false);
+      return true;
+    }
+    if (b.id == ID_RANDOM) {
+      softPanel(b.x, b.y, b.w, b.h, 9, UI_BORDER, uiPanelFill(pressed));
+      iconDice(cx, cy, UI_TEXT, uiPanelFill(pressed));
+      return true;
+    }
+  }
+
+  if (currentPage == PAGE_VACUUM) {
+    if (b.id == ID_VAC_START || b.id == ID_VAC_STOP) {
+      uint16_t c = (b.id == ID_VAC_START) ? UI_EMERALD : UI_ZINC;
+      bool active = b.id == ID_VAC_START && selected;
+      softPanel(b.x, b.y, b.w, b.h, 12, active ? uiTint(c, 105) : UI_BORDER,
+                active ? uiTint(c, 28) : uiPanelFill(pressed));
+      if (b.id == ID_VAC_START) iconPlay(b.x + 45, cy, UI_EMERALD);
+      else iconStopSq(b.x + 45, cy, UI_MUTED);
+      drawLeftText(b.label, b.x + 66, cy - 4, 1, (b.id == ID_VAC_START) ? UI_EMERALD : UI_MUTED);
+      return true;
+    }
+    if (b.id >= ID_VAC_DOCK && b.id <= ID_VAC_FIND) {
+      uint16_t c = (b.id == ID_VAC_DOCK) ? UI_SKY : (b.id == ID_VAC_FIND ? UI_PURPLE : UI_MUTED);
+      drawCompactButton(b, label, c, pressed, selected);
+      return true;
+    }
+  }
+
+  if (currentPage == PAGE_AIR) {
+    if (b.id >= ID_PMODE0 && b.id <= ID_PMODE3) {
+      uint16_t c = selected ? UI_SKY : UI_MUTED;
+      drawCompactButton(b, PUR_MODE_LABELS[b.id - ID_PMODE0], c, pressed, selected);
+      return true;
+    }
+    if (b.id >= ID_FAN0 && b.id <= ID_FAN2) {
+      uint16_t c = selected ? UI_EMERALD : UI_MUTED;
+      drawCompactButton(b, PUR_FAN_LABELS[b.id - ID_FAN0], c, pressed, selected);
+      return true;
+    }
+  }
+
+  if (currentPage == PAGE_CAM) {
+    if (b.id == ID_CAP_VIEW) {
+      softPanel(b.x, b.y, b.w, b.h, 12, UI_BORDER_2, 0x0000);
+      drawLeftText("REC 60FPS", b.x + 8, b.y + 10, 1, UI_DIM);
+      drawLeftText("CH1", b.x + b.w - 28, b.y + 10, 1, UI_DIM);
+      drawLeftText("320x240", b.x + 8, b.y + b.h - 14, 1, UI_DIM);
+      drawLeftText("1.0X", b.x + b.w - 32, b.y + b.h - 14, 1, UI_DIM);
+      tft.drawFastHLine(cx - 20, cy - 20, 12, UI_EMERALD);
+      tft.drawFastVLine(cx - 20, cy - 20, 12, UI_EMERALD);
+      tft.drawFastHLine(cx + 8, cy - 20, 12, UI_EMERALD);
+      tft.drawFastVLine(cx + 20, cy - 20, 12, UI_EMERALD);
+      tft.drawFastHLine(cx - 20, cy + 20, 12, UI_EMERALD);
+      tft.drawFastVLine(cx - 20, cy + 8, 12, UI_EMERALD);
+      tft.drawFastHLine(cx + 8, cy + 20, 12, UI_EMERALD);
+      tft.drawFastVLine(cx + 20, cy + 8, 12, UI_EMERALD);
+      drawCenteredText("ROOM EYE LIVE", cx, cy, 1, UI_MUTED);
+      return true;
+    }
+    if (b.id == ID_CAP) {
+      softPanel(b.x, b.y, b.w, b.h, 12, uiTint(UI_ROSE, 80), uiTint(UI_ROSE, pressed ? 50 : 28));
+      iconCamera(cx, cy - 12, UI_ROSE, uiTint(UI_ROSE, 28));
+      drawCenteredText("CAPTURE", cx, cy + 18, 1, UI_ROSE);
+      return true;
+    }
+    if (b.id == ID_CAP_FLASH) {
+      softPanel(b.x, b.y, b.w, b.h, 9, UI_BORDER, uiPanelFill(pressed));
+      iconSun(b.x + 24, cy, UI_AMBER);
+      drawCenteredText("FLASH", cx + 14, cy, 1, UI_AMBER);
+      return true;
+    }
+  }
+
+  if (currentPage == PAGE_SET) {
+    if (b.id == ID_SET_CAL || b.id == ID_SET_SYNC || b.id == ID_SET_DIAG) {
+      softPanel(b.x, b.y, b.w, b.h, 12, UI_BORDER, uiPanelFill(pressed));
+      uint16_t c = (b.id == ID_SET_CAL) ? UI_SKY : (b.id == ID_SET_SYNC ? UI_EMERALD : UI_PURPLE);
+      if (b.id == ID_SET_CAL) calDrawCross(cx, b.y + 14, c);
+      else if (b.id == ID_SET_SYNC) iconRefresh(cx, b.y + 14, c);
+      else {
+        tft.drawCircle(cx, b.y + 14, 8, c);
+        tft.fillCircle(cx, b.y + 10, 1, c);
+        tft.fillRect(cx - 1, b.y + 14, 3, 6, c);
+      }
+      drawCenteredText(b.label, cx, b.y + 31, 1, UI_TEXT);
+      return true;
+    }
+    if (b.id == ID_SET_THEME) {
+      softPanel(b.x, b.y, b.w, b.h, 9, UI_BORDER, uiPanelFill(pressed));
+      drawLeftText("THEME:", b.x + 12, cy - 4, 1, UI_MUTED);
+      drawLeftText(darkTheme ? "DARK" : "LIGHT", b.x + b.w - 48, cy - 4, 1, UI_SKY);
+      return true;
+    }
+    if (b.id == ID_SET_TIMEOUT) {
+      softPanel(b.x, b.y, b.w, b.h, 9, UI_BORDER, uiPanelFill(pressed));
+      char t[8];
+      snprintf(t, sizeof(t), "%lus", offAfterMs / 1000);
+      drawLeftText("TIMEOUT:", b.x + 12, cy - 4, 1, UI_MUTED);
+      drawLeftText(t, b.x + b.w - 38, cy - 4, 1, UI_AMBER);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void drawBtn(Btn& b, bool pressed) {
@@ -1057,17 +1409,24 @@ void drawBtn(Btn& b, bool pressed) {
     selected = st.purAvail && strcasecmp(st.purFan, PUR_FAN_MATCH[b.id - ID_FAN0]) == 0;
   } else if (b.id >= ID_MODE0 && b.id <= ID_MODE5) {
     label = MODE_LABELS[b.id - ID_MODE0];
+    if (currentPage == PAGE_COLOR && b.id == ID_MODE0) label = "COLD";
+    if (currentPage == PAGE_COLOR && b.id == ID_MODE1) label = "WARM";
     selected = st.lightMode[0] && strcasecmp(st.lightMode, MODE_MATCH[b.id - ID_MODE0]) == 0;
+    if (currentPage == PAGE_COLOR) selected = false;
   } else if (b.id >= ID_VAC_START && b.id <= ID_VAC_FIND) {
     selected = (vacActiveId() == b.id);   // accent border on the active state
+    if (selected && b.id == ID_VAC_DOCK) label = "DOCKED";
   }
 
-  uint8_t gstyle = pressed ? GS_PRESSED : (selected ? GS_SELECTED : GS_NORMAL);
+  bool vacStateSelected = selected && b.id >= ID_VAC_START && b.id <= ID_VAC_FIND;
+  uint8_t gstyle = pressed ? GS_PRESSED : ((selected && !vacStateSelected) ? GS_SELECTED : GS_NORMAL);
   uint16_t fill = glassBody(b.h / 2, b.h, gstyle);   // mid tone for icon cut-outs
   uint16_t text = selected ? COL_ACCENT : COL_TEXT;
 
   int16_t cx = b.x + b.w / 2;
   int16_t cy = b.y + b.h / 2;
+
+  if (drawHtmlButton(b, pressed, selected, label)) return;
 
   // The round "key" buttons (back, brightness off/on, purifier power) carry the
   // circle-border identity; everything else is a strongly-rounded frosted
@@ -1088,16 +1447,19 @@ void drawBtn(Btn& b, bool pressed) {
 
   switch (b.id) {
     case ID_BACK:
-      iconBack(cx, cy, COL_ACCENT);
+      iconBack(cx, cy, pressed ? COL_ACCENT : COL_DIM);
       return;
     case ID_PUR_POWER:
       iconPower(cx, cy, st.purOn ? COL_OK : COL_ERR, fill);
+      drawCenteredText(st.purOn ? "ON" : "OFF", cx, cy + 15, 1, COL_SUB);
       return;
     case ID_BR_OFF:
       iconPower(cx, cy, COL_ERR, fill);
+      drawCenteredText("OFF", cx, cy + 19, 1, COL_SUB);
       return;
     case ID_BR_ON:
       iconSun(cx, cy, COL_WARM);
+      drawCenteredText("ON", cx, cy + 19, 1, COL_SUB);
       return;
 
     case ID_NAV_LIGHTS:
@@ -1142,11 +1504,16 @@ void drawBtn(Btn& b, bool pressed) {
       iconCamera(cx, b.y + 38, COL_WARM, fill);
       iconSun(cx + 34, b.y + 22, COL_WARM);
       drawCenteredText(b.label, cx, b.y + 72, 2, text);
-      drawCenteredText("blink bulbs", cx, b.y + 94, 1, COL_DIM);
+      drawCenteredText("bulbs flash", cx, b.y + 94, 1, COL_DIM);
       return;
     case ID_CAP_VIEW:
       iconFind(b.x + 30, cy, COL_ACCENT);
       drawCenteredText(b.label, cx + 12, cy, 1, text);
+      if (st.moments >= 0) {
+        char saved[14];
+        snprintf(saved, sizeof(saved), "%d saved", st.moments);
+        drawCenteredText(saved, cx + 12, cy + 18, 1, COL_SUB);
+      }
       return;
 
     case ID_SET_CAL:
@@ -1180,13 +1547,8 @@ void drawBtn(Btn& b, bool pressed) {
       return;
     }
     case ID_SET_THEME: {
-      if (darkTheme) {              // currently dark -> show moon, tap = go light
-        tft.fillCircle(cx, b.y + 18, 9, COL_ACCENT);
-        tft.fillCircle(cx + 6, b.y + 15, 8, fill);
-      } else {                      // currently light -> show sun
-        iconSun(cx, b.y + 18, COL_WARM);
-      }
-      drawCenteredText(darkTheme ? "DARK" : "LIGHT", cx, b.y + 40, 1, text);
+      drawCenteredText(darkTheme ? "DARK" : "LIGHT", cx, b.y + 18, 2, COL_ACCENT);
+      drawCenteredText("THEME", cx, b.y + 40, 1, text);
       return;
     }
 
@@ -1200,15 +1562,15 @@ void drawBtn(Btn& b, bool pressed) {
       return;
     case ID_VAC_DOCK:
       iconDock(cx, b.y + 18, COL_ACCENT);
-      drawCenteredText(b.label, cx, b.y + 44, 1, text);
+      drawCenteredText(label, cx, b.y + 44, 1, text);
       return;
     case ID_VAC_PAUSE:
       iconPause(cx, b.y + 18, COL_TEXT);
-      drawCenteredText(b.label, cx, b.y + 44, 1, text);
+      drawCenteredText(label, cx, b.y + 44, 1, text);
       return;
     case ID_VAC_FIND:
       iconFind(cx, b.y + 18, COL_ACCENT);
-      drawCenteredText(b.label, cx, b.y + 44, 1, text);
+      drawCenteredText(label, cx, b.y + 44, 1, text);
       return;
   }
 
@@ -1233,6 +1595,16 @@ void drawBtn(Btn& b, bool pressed) {
       tft.drawFastVLine(b.x + 14 + px, b.y + 10, b.h - 20, hueTo565(px * 6));
     }
     drawCenteredText(label, cx + 14, cy, 2, text);
+    return;
+  }
+
+  if (currentPage == PAGE_COLOR && (b.id == ID_MODE0 || b.id == ID_MODE1)) {
+    uint16_t c = (b.id == ID_MODE1) ? COL_WARM : COL_ACCENT;
+    drawCenteredText(label, cx, cy, 2, c);
+    return;
+  }
+  if (currentPage == PAGE_COLOR && b.id == ID_RANDOM) {
+    iconDice(cx, cy, COL_ACCENT, fill);
     return;
   }
 
@@ -1321,41 +1693,44 @@ static uint16_t vacStateLabel(char* out, size_t n) {
 // (number + level bar, color-coded) on the right. Replaces the old cramped
 // corner text so the two things that matter are glanceable.
 void drawVacStatusCard() {
-  const int16_t X = 5, Y = 46, W = 310, H = 64;
-  glassPanel(X, Y, W, H, 20, GS_NORMAL);
+  const int16_t X = 12, Y = 75, W = 296, H = 52;
+  softPanel(X, Y, W, H, 12, UI_BORDER, uiTint(0xFFFF, 7));
 
-  if (!st.valid)    { drawCenteredText("connecting...", X + W / 2, Y + H / 2, 2, COL_SUB); return; }
-  if (!st.vacAvail) { drawCenteredText("offline",       X + W / 2, Y + H / 2, 2, COL_OFFLINE); return; }
+  if (!st.valid)    { drawCenteredText("connecting...", X + W / 2, Y + H / 2, 1, UI_MUTED); return; }
+  if (!st.vacAvail) { drawCenteredText("offline",       X + W / 2, Y + H / 2, 1, UI_ROSE); return; }
 
   char label[16];
   uint16_t sc = vacStateLabel(label, sizeof(label));
-  drawLeftText("STATUS", X + 16, Y + 12, 1, COL_SUB);
-  drawLeftText(label,    X + 16, Y + 28, 2, sc);
+  drawLeftText("CURRENT STATE", X + 12, Y + 11, 1, UI_DIM);
+  tft.fillCircle(X + 15, Y + 30, 3, sc);
+  drawLeftText(label, X + 24, Y + 25, 1, UI_TEXT);
 
   if (st.vacBattery >= 0) {
     int pct = constrain(st.vacBattery, 0, 100);
     uint16_t bc = pct > 50 ? COL_OK : (pct > 20 ? COL_WARM : COL_ERR);
-    int16_t rcx = X + W - 70;
     char pb[6];
     snprintf(pb, sizeof(pb), "%d%%", pct);
-    drawCenteredText("BATTERY", rcx, Y + 12, 1, COL_SUB);
-    drawCenteredText(pb,        rcx, Y + 30, 2, bc);
-    int16_t lbx = rcx - 58, lby = Y + 48, lbw = 116, lbh = 7;
-    tft.drawRoundRect(lbx, lby, lbw, lbh, 2, COL_EDGE);
-    int fw = (lbw - 2) * pct / 100;
-    if (fw > 0) tft.fillRect(lbx + 1, lby + 1, fw, lbh - 2, bc);
+    drawLeftText("BATTERY LEVEL", X + W - 96, Y + 11, 1, UI_DIM);
+    drawLeftText(pb, X + W - 45, Y + 25, 1, bc);
   }
 }
 
 // AIR tile geometry (3 tiles across), shared by draw + live value updates.
-#define AIR_TY 46
-#define AIR_TH 58
-static inline int16_t airTileX(int idx) { return 5 + idx * 105; }   // w=100, gutter 5
+#define AIR_TY 75
+#define AIR_TH 54
+static inline int16_t airTileX(int idx) { return 12 + idx * 101; }   // w=94, gutter 7
 
 void airTileValue(int idx, const char* value, uint16_t color) {
   int16_t x = airTileX(idx);
-  glassErase(x + 4, AIR_TY + 28, 92, 26, AIR_TY, AIR_TH, GS_NORMAL);
-  drawCenteredText(value, x + 50, AIR_TY + 38, 2, color);
+  tft.fillRect(x + 4, AIR_TY + 20, 86, 30, UI_PANEL);
+  drawCenteredText(value, x + 47, AIR_TY + 31, 1, color);
+}
+
+void airTileMetric(int idx, const char* value, const char* quality, uint16_t color) {
+  int16_t x = airTileX(idx);
+  tft.fillRect(x + 4, AIR_TY + 18, 86, 32, UI_PANEL);
+  drawCenteredText(value,   x + 47, AIR_TY + 29, 1, color);
+  drawCenteredText(quality, x + 47, AIR_TY + 45, 1, color);
 }
 
 void drawAirValues() {
@@ -1368,11 +1743,12 @@ void drawAirValues() {
   }
   if (st.pm25 >= 0) {
     snprintf(buf, sizeof(buf), "%d", st.pm25);
-    airTileValue(0, buf, st.pm25 <= 35 ? COL_OK : (st.pm25 <= 75 ? COL_WARM : COL_ERR));
+    uint16_t qc = st.pm25 <= 35 ? COL_OK : (st.pm25 <= 75 ? COL_WARM : COL_ERR);
+    airTileMetric(0, buf, st.pm25 <= 35 ? "GOOD" : (st.pm25 <= 75 ? "OK" : "POOR"), qc);
   } else airTileValue(0, "-", COL_DIM);
 
   if (st.tempC > -999) {
-    snprintf(buf, sizeof(buf), "%dC", st.tempC);
+    snprintf(buf, sizeof(buf), "%d C", st.tempC);
     airTileValue(1, buf, COL_TEXT);
   } else airTileValue(1, "-", COL_DIM);
 
@@ -1386,8 +1762,8 @@ void drawAirTiles() {
   const char* labels[3] = { "PM2.5", "TEMP", "HUMIDITY" };
   for (int i = 0; i < 3; i++) {
     int16_t x = airTileX(i);
-    glassPanel(x, AIR_TY, 100, AIR_TH, 16, GS_NORMAL);
-    drawCenteredText(labels[i], x + 50, AIR_TY + 12, 1, COL_DIM);
+    softPanel(x, AIR_TY, 94, AIR_TH, 12, UI_BORDER, UI_PANEL);
+    drawCenteredText(labels[i], x + 47, AIR_TY + 10, 1, UI_DIM);
   }
   drawAirValues();
 }
@@ -1395,6 +1771,7 @@ void drawAirTiles() {
 void drawPage() {
   updateAliveTint();          // refresh the bulb-color vibe for this draw
   drawBackground();           // living navy + glow
+  drawPageHeader();
 
   if (currentPage == PAGE_VACUUM) drawVacStatusCard();
   if (currentPage == PAGE_AIR)    drawAirTiles();
@@ -1406,11 +1783,20 @@ void drawPage() {
   }
 
   if (currentPage == PAGE_COLOR) {
+    char hv[10], sv[8];
+    snprintf(hv, sizeof(hv), "%d deg", curHue);
+    snprintf(sv, sizeof(sv), "%d%%", curSat);
+    drawLeftText("HUE (GRADIENT)", 13, 84, 1, UI_DIM);
+    drawLeftText(hv, 268, 84, 1, UI_DIM);
+    drawLeftText("SATURATION", 13, 131, 1, UI_DIM);
+    drawLeftText(sv, 282, 131, 1, UI_DIM);
     drawColorPreview();
   }
-  if (currentPage == PAGE_SET) {
-    drawCenteredText("DISPLAY", 160, 166, 1, COL_DIM);   // label above the brightness bar
+  if (currentPage == PAGE_AIR) {
+    drawLeftText("MODE SELECTOR", 12, 145, 1, UI_DIM);
+    drawLeftText("FAN SPEED", 164, 145, 1, UI_DIM);
   }
+  drawBottomIndicator();
 
   // The Dynamic Island is drawn last so it floats above everything.
   drawIsland();
@@ -1956,56 +2342,54 @@ void sendHueColor() {
 // the panel and its link to the server, in a label/value list. Tap to close.
 void showDeviceInfo() {
   tft.fillScreen(COL_BG);
-  drawCenteredText("DEVICE INFO", 160, 14, 2, COL_TEXT);
+  drawLeftText("TELEMETRY DIAGNOSTIC", 28, 14, 1, UI_TEXT);
+  tft.drawCircle(18, 15, 7, UI_SKY);
+  tft.fillCircle(18, 11, 1, UI_SKY);
+  tft.fillRect(17, 15, 3, 5, UI_SKY);
+  drawLeftText("ESP32-S3", 256, 14, 1, UI_DIM);
+  tft.drawFastHLine(12, 27, 296, UI_BORDER);
 
-  char v[56];
-  int16_t y = 32;
-  auto kv = [&](const char* k, const char* val, uint16_t c) {
-    drawLeftText(k, 14, y, 1, COL_DIM);
-    drawLeftText(val, 116, y, 1, c);
-    y += 14;
+  char v[64];
+  bool wifi = (WiFi.status() == WL_CONNECTED);
+  auto row = [&](int col, int row, const char* k, const char* val, uint16_t c) {
+    int16_t x = col == 0 ? 14 : 168;
+    int16_t vx = col == 0 ? 76 : 238;
+    int16_t y = 44 + row * 16;
+    drawLeftText(k, x, y, 1, UI_DIM);
+    drawLeftText(val, vx, y, 1, c);
   };
 
-  bool wifi = (WiFi.status() == WL_CONNECTED);
+  row(0, 0, "DEVICE", OTA_HOSTNAME, UI_TEXT);
+  row(0, 1, "FIRM", __DATE__, UI_TEXT);
+  row(0, 2, "SSID", wifi ? WiFi.SSID().c_str() : (ENABLE_WIFI ? "connecting" : "disabled"), wifi ? UI_EMERALD : UI_AMBER);
+  row(0, 3, "IP", wifi ? WiFi.localIP().toString().c_str() : "-", wifi ? UI_SKY : UI_DIM);
+  row(0, 4, "GATE", wifi ? WiFi.gatewayIP().toString().c_str() : "-", UI_TEXT);
+  row(0, 5, "MAC", "A0:B7...", UI_MUTED);
 
-  kv("Device", OTA_HOSTNAME, COL_TEXT);
-  kv("Firmware", __DATE__, COL_SUB);
-
-  kv("Wi-Fi", wifi ? WiFi.SSID().c_str() : (ENABLE_WIFI ? "connecting..." : "disabled"),
-     wifi ? COL_OK : COL_WARM);
-  kv("IP", wifi ? WiFi.localIP().toString().c_str() : "-", wifi ? COL_TEXT : COL_DIM);
-  kv("Gateway", wifi ? WiFi.gatewayIP().toString().c_str() : "-", COL_SUB);
-  kv("MAC", WiFi.macAddress().c_str(), COL_SUB);
   if (wifi) {
-    int r = WiFi.RSSI();
-    const char* q = r > -60 ? "strong" : (r > -72 ? "ok" : "weak");
-    snprintf(v, sizeof(v), "%d dBm  %s", r, q);
-    kv("Signal", v, r > -72 ? COL_OK : COL_WARM);
+    int rssi = WiFi.RSSI();
+    const char* q = rssi > -60 ? "STRONG" : (rssi > -72 ? "OK" : "WEAK");
+    snprintf(v, sizeof(v), "%d %s", rssi, q);
+    row(1, 0, "RSSI", v, rssi > -72 ? UI_EMERALD : UI_AMBER);
+  } else {
+    row(1, 0, "RSSI", "-", UI_DIM);
   }
-
-  snprintf(v, sizeof(v), "%s:%u", API_HOST, API_PORT);
-  kv("Server", v, COL_SUB);
-  kv("Stream", sseClient.connected() ? "connected" : "offline",
-     sseClient.connected() ? COL_OK : COL_WARM);
-
+  snprintf(v, sizeof(v), "1.2:%u", API_PORT);
+  row(1, 1, "SERVER", v, UI_TEXT);
+  row(1, 2, "CONN", sseClient.connected() ? "CONNECTED" : "OFFLINE", sseClient.connected() ? UI_EMERALD : UI_AMBER);
   unsigned long s = millis() / 1000;
   if (s >= 3600) snprintf(v, sizeof(v), "%luh %lum", s / 3600, (s % 3600) / 60);
   else           snprintf(v, sizeof(v), "%lum %lus", s / 60, s % 60);
-  kv("Uptime", v, COL_SUB);
-
-  snprintf(v, sizeof(v), "%u / %u KB free",
+  row(1, 3, "UPTIME", v, UI_TEXT);
+  snprintf(v, sizeof(v), "%u/%uK",
            (unsigned)(ESP.getFreeHeap() / 1024), (unsigned)(ESP.getHeapSize() / 1024));
-  kv("RAM", v, COL_SUB);
-
-  snprintf(v, sizeof(v), "%s  %d-core", ESP.getChipModel(), ESP.getChipCores());
-  kv("Chip", v, COL_SUB);
+  row(1, 4, "RAM", v, UI_PURPLE);
   snprintf(v, sizeof(v), "%u MB", (unsigned)(ESP.getFlashChipSize() / (1024 * 1024)));
-  kv("Flash", v, COL_SUB);
+  row(1, 5, "FLASH", v, UI_TEXT);
 
-  snprintf(v, sizeof(v), "%dx%d", SCREEN_W, SCREEN_H);
-  kv("Display", v, COL_SUB);
-
-  drawCenteredText("tap to close", 160, 232, 1, COL_DIM);
+  tft.drawFastVLine(160, 36, 102, UI_BORDER);
+  tft.drawFastHLine(12, 212, 296, UI_BORDER);
+  drawCenteredText("TAP ANYWHERE TO EXIT DIAGNOSTIC", 160, 226, 1, UI_DIM);
   diagActive = true;
   ignoreUntilRelease = true;
   lastActivityMs = millis();
@@ -2429,6 +2813,15 @@ void updateTouch() {
 
   if (ignoreUntilRelease) {
     if (!touching) ignoreUntilRelease = false;
+    return;
+  }
+
+  // Tap the island for a plain-language connection summary. On MAIN, keep the
+  // left half reserved for the existing long-press calibration shortcut.
+  if (rising && x >= ISL_X && x <= ISL_X + ISL_W && y >= ISL_Y && y <= ISL_Y + ISL_H &&
+      (currentPage != PAGE_MAIN || x >= ISL_CX - 10)) {
+    drawConnStatusToast();
+    ignoreUntilRelease = true;
     return;
   }
 

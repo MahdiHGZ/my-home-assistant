@@ -60,89 +60,88 @@ const char* PUR_FAN_MATCH[3]   = { "Low", "Medium", "High" };
 // Island tab owns the top-center.
 //   3-col: 5 |100| 5 |100| 5 |100| 5 = 320
 Btn mainBtns[] = {
-  {   5,  40, 100, 95, "LIGHTS", ID_NAV_LIGHTS },
-  { 110,  40, 100, 95, "VACUUM", ID_NAV_VACUUM },
-  { 215,  40, 100, 95, "AIR",    ID_NAV_AIR },
-  {   5, 141, 100, 95, "CAMERA", ID_NAV_CAM },
-  { 110, 141, 100, 95, "SETUP",  ID_NAV_SET },
-  { 215, 141, 100, 95, "NIGHT",  ID_SCENE_NIGHT },
+  {  12,  50,  94, 84, "LIGHTS", ID_NAV_LIGHTS },
+  { 113,  50,  94, 84, "VACUUM", ID_NAV_VACUUM },
+  { 214,  50,  94, 84, "AIR",    ID_NAV_AIR },
+  {  12, 140,  94, 84, "CAMERA", ID_NAV_CAM },
+  { 113, 140,  94, 84, "SETUP",  ID_NAV_SET },
+  { 214, 140,  94, 84, "NIGHT",  ID_SCENE_NIGHT },
 };
 
 Btn lightsBtns[] = {
-  {   6,   3,  38,  38, "",      ID_BACK },     // circle
+  {  12,  31,  48,  36, "",      ID_BACK },
 
-  {   5,  46, 100,  66, "",      ID_MODE5 },   // MOVIE
-  { 110,  46, 100,  66, "",      ID_MODE4 },   // LOVE
-  { 215,  46, 100,  66, "MORE",  ID_MORE },
+  {   8,  73,  98,  52, "",      ID_MODE5 },   // MOVIE
+  { 111,  73,  98,  52, "",      ID_MODE4 },   // LOVE
+  { 214,  73,  98,  52, "MODES", ID_MORE },
 
-  {   5, 118, 310,  46, "COLOR", ID_COLOR_PAGE },
+  {   8, 130, 304,  46, "SPECTRUM COLOR", ID_COLOR_PAGE },
 
-  {   5, 170,  62,  62, "",      ID_BR_OFF },   // circle
-  {  73, 176, 174,  50, "",      ID_BRIGHT },   // pill bar
-  { 253, 170,  62,  62, "",      ID_BR_ON },    // circle
+  {   8, 181,  48,  46, "",      ID_BR_OFF },
+  {  64, 181, 248,  46, "",      ID_BRIGHT },
 };
 
 Btn modesBtns[] = {
-  {   6,   3,  38,  38, "", ID_BACK },
-  {   5,  46, 100,  92, "", ID_MODE0 },
-  { 110,  46, 100,  92, "", ID_MODE1 },
-  { 215,  46, 100,  92, "", ID_MODE2 },
-  {   5, 144, 100,  92, "", ID_MODE3 },
-  { 110, 144, 100,  92, "", ID_MODE4 },
-  { 215, 144, 100,  92, "", ID_MODE5 },
+  {  12,  31,  48,  36, "", ID_BACK },
+  {  12,  86,  94,  44, "", ID_MODE0 },
+  { 113,  86,  94,  44, "", ID_MODE1 },
+  { 214,  86,  94,  44, "", ID_MODE2 },
+  {  12, 136,  94,  44, "", ID_MODE3 },
+  { 113, 136,  94,  44, "", ID_MODE4 },
+  { 214, 136,  94,  44, "", ID_MODE5 },
 };
 
 Btn colorBtns[] = {
-  {   6,   3,  38,  38, "",       ID_BACK },
-  {   5,  46, 310,  62, "",       ID_HUE },   // hue 0..359
-  {   5, 116, 310,  38, "",       ID_SAT },   // saturation white->full (§5.4)
-  { 110, 166, 100,  66, "WHITE",  ID_WHITE },
-  { 215, 166, 100,  66, "RANDOM", ID_RANDOM },
+  {  12,  31,  48,  36, "",       ID_BACK },
+  {   8,  94, 304,  28, "",       ID_HUE },   // hue 0..359
+  {   8, 143, 304,  28, "",       ID_SAT },   // saturation white->full (§5.4)
+  {  84, 183,  72,  44, "WARM",   ID_MODE1 },
+  { 164, 183,  72,  44, "COLD",   ID_MODE0 },
+  { 244, 183,  68,  44, "",       ID_RANDOM },
 };
 
 Btn vacuumBtns[] = {
-  {   6,   3,  38,  38, "",      ID_BACK },
+  {  12,  31,  48,  36, "",      ID_BACK },
   // Status card occupies y46..110 (drawn by drawVacStatusCard, not a button).
   // Primary pair:
-  {   5, 116, 152, 56, "START", ID_VAC_START },
-  { 163, 116, 152, 56, "STOP",  ID_VAC_STOP },
+  {   8, 132, 148, 46, "START", ID_VAC_START },
+  { 164, 132, 148, 46, "STOP",  ID_VAC_STOP },
   // Secondary row:
-  {   5, 178, 100, 56, "DOCK",  ID_VAC_DOCK },
-  { 110, 178, 100, 56, "PAUSE", ID_VAC_PAUSE },
-  { 215, 178, 100, 56, "FIND",  ID_VAC_FIND },
+  {   8, 184,  98, 43, "DOCK",  ID_VAC_DOCK },
+  { 111, 184,  98, 43, "PAUSE", ID_VAC_PAUSE },
+  { 214, 184,  98, 43, "FIND",  ID_VAC_FIND },
 };
 
 Btn airBtns[] = {
-  {   6,   3,  38, 38, "", ID_BACK },
-  { 268,   2, 40, 40, "", ID_PUR_POWER },   // circle, top-right
+  {  12,  31, 48, 36, "", ID_BACK },
+  { 260,  31, 48, 36, "", ID_PUR_POWER },
 
-  {   5, 108,  74, 56, "", ID_PMODE0 },
-  {  84, 108,  74, 56, "", ID_PMODE1 },
-  { 163, 108,  74, 56, "", ID_PMODE2 },
-  { 242, 108,  74, 56, "", ID_PMODE3 },
+  {  12, 156,  67, 34, "", ID_PMODE0 },
+  {  84, 156,  67, 34, "", ID_PMODE1 },
+  {  12, 195,  67, 34, "", ID_PMODE2 },
+  {  84, 195,  67, 34, "", ID_PMODE3 },
 
-  {   5, 170, 100, 56, "", ID_FAN0 },
-  { 110, 170, 100, 56, "", ID_FAN1 },
-  { 215, 170, 100, 56, "", ID_FAN2 },
+  { 164, 172,  44, 52, "", ID_FAN0 },
+  { 213, 172,  44, 52, "", ID_FAN1 },
+  { 262, 172,  44, 52, "", ID_FAN2 },
 };
 
 Btn camBtns[] = {
-  {   6,   3,  38,  38, "",        ID_BACK },
-  {   5,  46, 152, 114, "CAPTURE", ID_CAP },
-  { 163,  46, 152, 114, "FLASH",   ID_CAP_FLASH },
-  {   5, 166, 310,  66, "VIEW LAST PHOTO", ID_CAP_VIEW },
+  {  12,  31,  48,  36, "",        ID_BACK },
+  {  12,  75, 174, 150, "VIEW",    ID_CAP_VIEW },
+  { 194,  75, 114,  96, "CAPTURE", ID_CAP },
+  { 194, 179, 114,  46, "FLASH",   ID_CAP_FLASH },
 };
 
 Btn setBtns[] = {
-  {   6,   3,  38,  38, "",          ID_BACK },
+  {  12,  31,  48,  36, "",          ID_BACK },
   // Row 1
-  {   5,  46, 100,  54, "CALIBRATE", ID_SET_CAL },
-  { 110,  46, 100,  54, "SYNC",      ID_SET_SYNC },
-  { 215,  46, 100,  54, "DEVICE",    ID_SET_DIAG },
+  {  12,  75,  94,  40, "CALIBRATE", ID_SET_CAL },
+  { 113,  75,  94,  40, "SYNC",      ID_SET_SYNC },
+  { 214,  75,  94,  40, "INFO",      ID_SET_DIAG },
   // Row 2
-  {   5, 106, 100,  54, "",          ID_SET_TIMEOUT },
-  { 110, 106, 100,  54, "",          ID_SET_NIGHT },
-  { 215, 106, 100,  54, "",          ID_SET_THEME },
+  {  12, 122, 143,  40, "",          ID_SET_THEME },
+  { 165, 122, 143,  40, "",          ID_SET_TIMEOUT },
   // Row 3: display backlight brightness (drag bar)
-  {   5, 176, 310,  48, "",          ID_SET_BRIGHT },
+  {  12, 176, 296,  40, "",          ID_SET_BRIGHT },
 };
