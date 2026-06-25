@@ -1,9 +1,11 @@
 # Coukab LAN
 
 Local-network home-automation controller. A numeric keypad (read via evdev)
-**and** a no-login web page drive Yeelight bulbs, a Xiaomi S20 vacuum, a Xiaomi
-Air Purifier 4 Lite, and a TP-Link Tapo camera — all over the LAN, no cloud
-required. An optional local LLM agent ("Khatoon", `brain.py`) exposes the same
+**and** a beautiful, no-login glassmorphic web dashboard drive Yeelight bulbs,
+a Xiaomi S20 vacuum, a Xiaomi Air Purifier 4 Lite, and a TP-Link Tapo camera —
+all over the LAN, no cloud required. The web UI is fully optimized for mobile
+viewports via bottom-nav tabs, and desktop viewports via responsive multi-column
+layouts. An optional local LLM agent ("Khatoon", `brain.py`) exposes the same
 device utilities as tool-calling functions.
 
 Run `python main.py` and you get **both** interfaces at once: the keypad and a
@@ -151,20 +153,22 @@ app-style icon that opens straight to the controls.
 
 ## What's on the web page
 
-A live dashboard (auto-refreshing) plus full controls:
+A live dashboard (auto-refreshing) featuring a modern minimal glassmorphic design, fluid typography, and responsive layouts:
 
-- **Lights** — tap individual bulbs (I1–I6) to target a subset, scenes
-  (cool/warm white, sunset, sleep, romantic, movie), brightness slider, full RGB
-  color picker, white-temperature slider, party mode + patterns, color cycle,
-  random colors, targeted on/off, all-off, and undo.
-- **Vacuum** — sweep / mop / both, pause, stop, return-to-dock, find-me, suction
-  and water levels, speaker volume, and a manual-drive D-pad.
-- **Air purifier** — power, modes, fan level, favorite speed, ionizer / child-lock
-  / buzzer toggles, screen brightness, and live PM2.5 / temperature / humidity.
-- **Camera** — capture a moment (with or without a flash blink) and browse recent
-  shots. Captured images are saved to `moments/`.
-- **Assistant** — a chat box for the local LLM ("Khatoon"); appears only when the
-  model is installed (see below).
+*   **Mobile Viewport Optimization:** A floating bottom tab bar navigation dynamically partitions controls into *Home*, *Lights*, *Devices* (Vacuum + Purifier), *Camera*, and *Khatoon Chat* views to avoid scrolling fatigue.
+*   **Desktop Viewport Adaptation:** Displays a unified dashboard view with a sticky sidebar on the left and a responsive multi-column layout on the right.
+*   **Lights** — tap individual bulbs (I1–I6) to target a subset, scenes
+    (cool/warm white, sunset, sleep, romantic, movie), brightness slider, full RGB
+    color picker, white-temperature slider, party mode + patterns, color cycle,
+    random colors, targeted on/off, all-off, and undo.
+*   **Vacuum** — sweep / mop / both, pause, stop, return-to-dock, find-me, suction
+    and water levels, speaker volume, and a manual-drive D-pad.
+*   **Air purifier** — power, modes, fan level, favorite speed, ionizer / child-lock
+    / buzzer toggles, screen brightness, and live PM2.5 / temperature / humidity.
+*   **Camera** — capture a moment (with or without a flash blink) and browse recent
+    shots. Captured images are saved to `moments/`.
+*   **Assistant** — a chat box for the local LLM ("Khatoon"); appears only when the
+    model is installed (see below).
 
 Web actions that touch shared lighting state (party dance, color cycle) run on
 the same serialized worker as the keypad, so the two interfaces never conflict.
