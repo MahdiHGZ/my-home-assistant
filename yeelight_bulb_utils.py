@@ -692,7 +692,10 @@ def apply_mode(
 
 
 def full_off(registered: dict[str, str]) -> None:
-    """Turns all registered bulbs OFF.
+    """Turns all registered bulbs OFF and saves OFF as each bulb's power-on default.
+
+    Persisting after ``turn_off`` prevents a later power or LAN glitch from
+    restoring a previous ON scene that was saved by an earlier ``apply_mode``.
 
     Args:
         registered: Bulb name-to-IP mapping.
@@ -703,6 +706,7 @@ def full_off(registered: dict[str, str]) -> None:
         try:
             bulb = _get_bulb(ip)
             bulb.turn_off()
+            _persist_default(bulb)
             logger.info("  %s (%s): OFF", name, ip)
         except Exception as e:
             _invalidate_bulb(ip)
