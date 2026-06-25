@@ -78,6 +78,7 @@ const AIR_MODE_ICONS = { auto: "fan", sleep: "moon", favorite: "heart", manual: 
 
 const I18N = {
   en: {
+    home: "Home", devices: "Devices",
     sub: "LAN home control", live: "live", offline: "offline", loading: "Loading…",
     lights: "Lights", vacuum: "Vacuum", air: "Air", air_purifier: "Air purifier",
     camera: "Camera", khatoon: "Khatoon",
@@ -113,6 +114,7 @@ const I18N = {
     panel_send_alert: "Alert", panel_alert_sent: "Sent to the panel",
   },
   fa: {
+    home: "خانه", devices: "دستگاه‌ها",
     sub: "کنترل خانه در شبکه محلی", live: "زنده", offline: "آفلاین", loading: "در حال بارگذاری…",
     lights: "چراغ‌ها", vacuum: "جاروبرقی", air: "هوا", air_purifier: "تصفیه هوا",
     camera: "دوربین", khatoon: "خاتون",
@@ -1056,6 +1058,54 @@ async function streamChat(msg, pending, ticker, log) {
   if (!answer) pending.textContent = "(no response)";
 }
 
+// --- tab routing for mobile bottom nav ---------------------------------------
+
+function initTabs() {
+  const tabs = document.querySelectorAll(".nav-tab");
+  const cards = {
+    home: [".dashboard", "#panelAlertCard"],
+    lights: ["#lightsCard"],
+    appliances: ["#vacuumCard", "#airCard"],
+    camera: ["#cameraCard"],
+    chat: ["#assistantCard"]
+  };
+
+  function showTab(tabName) {
+    tabs.forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.tab === tabName);
+    });
+
+    Object.keys(cards).forEach(key => {
+      const selectors = cards[key];
+      selectors.forEach(sel => {
+        const el = $(sel);
+        if (!el) return;
+        
+        if (key === "chat" && !(caps && caps.chat)) {
+          el.classList.add("hidden");
+          return;
+        }
+
+        if (tabName === key) {
+          el.classList.remove("tab-hidden");
+        } else {
+          el.classList.add("tab-hidden");
+        }
+      });
+    });
+    
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+
+  tabs.forEach(btn => {
+    btn.addEventListener("click", () => {
+      showTab(btn.dataset.tab);
+    });
+  });
+
+  showTab("home");
+}
+
 // --- init --------------------------------------------------------------------
 
 async function init() {
@@ -1079,7 +1129,16 @@ async function init() {
     const fs = $("#airFavSpeed");
     fs.min = caps.favorite_speed.min; fs.max = caps.favorite_speed.max; fs.step = caps.favorite_speed.step;
   }
-  if (caps.chat) $("#assistantCard").classList.remove("hidden");
+  if (caps.chat) {
+    $("#assistantCard").classList.remove("hidden");
+    const chatTab = $('[data-tab="chat"]');
+    if (chatTab) chatTab.classList.remove("hidden");
+  } else {
+    const chatTab = $('[data-tab="chat"]');
+    if (chatTab) chatTab.classList.add("hidden");
+  }
+
+  initTabs();
 
   connectEvents();       // live pushes; falls back to polling on failure
   pollStatus();          // immediate first paint even if SSE is slow to open

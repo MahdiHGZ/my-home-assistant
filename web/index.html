@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#070a16" />
   <title>Coukab Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
@@ -27,201 +30,228 @@
   </header>
 
   <main>
-    <!-- Dashboard -->
-    <section class="grid dashboard">
-      <article class="card stat" id="statLights">
-        <div class="stat-icon" data-icon="bulb"></div>
-        <div class="stat-body"><h3 data-i18n="lights">Lights</h3><p class="stat-line">—</p></div>
-      </article>
-      <article class="card stat" id="statVacuum">
-        <div class="stat-icon" data-icon="vacuum"></div>
-        <div class="stat-body"><h3 data-i18n="vacuum">Vacuum</h3><p class="stat-line">—</p></div>
-      </article>
-      <article class="card stat" id="statAir">
-        <div class="stat-icon" data-icon="wind"></div>
-        <div class="stat-body"><h3 data-i18n="air">Air</h3><p class="stat-line">—</p></div>
-      </article>
-      <article class="card stat" id="statCamera">
-        <div class="stat-icon" data-icon="camera"></div>
-        <div class="stat-body"><h3 data-i18n="camera">Camera</h3><p class="stat-line">—</p></div>
-      </article>
-    </section>
+    <div class="sidebar-column">
+      <!-- Dashboard -->
+      <section class="grid dashboard">
+        <article class="card stat" id="statLights">
+          <div class="stat-icon" data-icon="bulb"></div>
+          <div class="stat-body"><h3 data-i18n="lights">Lights</h3><p class="stat-line">—</p></div>
+        </article>
+        <article class="card stat" id="statVacuum">
+          <div class="stat-icon" data-icon="vacuum"></div>
+          <div class="stat-body"><h3 data-i18n="vacuum">Vacuum</h3><p class="stat-line">—</p></div>
+        </article>
+        <article class="card stat" id="statAir">
+          <div class="stat-icon" data-icon="wind"></div>
+          <div class="stat-body"><h3 data-i18n="air">Air</h3><p class="stat-line">—</p></div>
+        </article>
+        <article class="card stat" id="statCamera">
+          <div class="stat-icon" data-icon="camera"></div>
+          <div class="stat-body"><h3 data-i18n="camera">Camera</h3><p class="stat-line">—</p></div>
+        </article>
+      </section>
 
-    <!-- Lights -->
-    <section class="card" id="lightsCard">
-      <div class="card-head">
-        <h2><i data-icon="bulb"></i> <span data-i18n="lights">Lights</span></h2>
-        <span id="partyBadge" class="badge hidden"><i data-icon="party"></i><span id="partyBadgeText">party</span></span>
-      </div>
+      <!-- Touch-panel alert -->
+      <section class="card" id="panelAlertCard">
+        <div class="card-head"><h2><i data-icon="bell"></i> <span data-i18n="panel_alert">Panel alert</span></h2></div>
+        <p class="hint" data-i18n="panel_alert_hint">Pop a message up on the wall touch panel (Latin text only).</p>
+        <form id="alertForm" class="chat-form alert-form">
+          <input type="text" id="alertText" maxlength="200" data-i18n-ph="panel_alert_placeholder" placeholder="e.g. Dinner is ready!" autocomplete="off" />
+          <button type="submit" class="pill"><i data-icon="bell"></i> <span data-i18n="panel_send_notice">Notice</span></button>
+          <button type="button" class="pill danger" id="alertUrgent"><i data-icon="bell"></i> <span data-i18n="panel_send_alert">Alert</span></button>
+        </form>
+      </section>
+    </div>
 
-      <div class="subhead" data-i18n="target">Target</div>
-      <div id="bulbGrid" class="bulb-grid"></div>
-      <p class="hint" data-i18n="hint_target">Tap bulbs to target them. None selected = all.</p>
-      <div class="btn-row wrap target-power">
-        <button class="pill" id="targetsOn"><i data-icon="power"></i> <span data-i18n="on">On</span></button>
-        <button class="pill danger" id="targetsOff"><i data-icon="power-off"></i> <span data-i18n="off">Off</span></button>
-      </div>
-
-      <div class="subhead" data-i18n="scenes">Scenes</div>
-      <div id="sceneBtns" class="btn-row wrap"></div>
-
-      <div class="subhead" data-i18n="brightness">Brightness</div>
-      <div class="slider-row">
-        <button class="round-btn" data-light="brightness_down" aria-label="Brightness down"><i data-icon="minus"></i></button>
-        <input type="range" id="brightness" min="1" max="100" value="100" aria-label="Brightness" />
-        <button class="round-btn" data-light="brightness_up" aria-label="Brightness up"><i data-icon="plus"></i></button>
-      </div>
-
-      <div class="subhead" data-i18n="color">Color</div>
-      <div class="btn-row wrap">
-        <label class="color-pick">
-          <input type="color" id="colorPicker" value="#4cc2ff" aria-label="Pick a color" />
-          <i data-icon="palette"></i><span data-i18n="pick">Pick</span>
-        </label>
-        <div id="colorChips" class="chips"></div>
-      </div>
-
-      <div class="subhead" data-i18n="white_temp">White temperature</div>
-      <div class="slider-row warm-cool">
-        <span data-i18n="warm">Warm</span>
-        <input type="range" id="colorTemp" min="1700" max="6500" step="100" value="4000" aria-label="White temperature" />
-        <span data-i18n="cool">Cool</span>
-      </div>
-
-      <div class="subhead" data-i18n="party_fx">Party &amp; effects</div>
-      <div class="btn-row wrap">
-        <button class="pill" data-light="party_toggle"><i data-icon="party"></i> <span data-i18n="party">Party</span></button>
-        <button class="pill" data-light="cycle_prev"><i data-icon="chevron-left"></i> <span data-i18n="prev">Prev</span></button>
-        <button class="pill" data-light="cycle_start"><i data-icon="palette"></i> <span data-i18n="cycle">Cycle</span></button>
-        <button class="pill" data-light="cycle_next"><span data-i18n="next">Next</span> <i data-icon="chevron-right"></i></button>
-        <button class="pill" data-light="random_color"><i data-icon="shuffle"></i> <span data-i18n="random">Random</span></button>
-        <button class="pill" data-light="random_each"><i data-icon="shuffle"></i> <span data-i18n="each">Each</span></button>
-      </div>
-      <div id="patternWrap" class="hidden">
-        <div class="subhead" data-i18n="pattern">Dance pattern</div>
-        <div id="patternRow" class="btn-row wrap"></div>
-      </div>
-      <div class="btn-row wrap">
-        <button class="pill" data-light="full_bright"><i data-icon="sun"></i> <span data-i18n="full">Full</span></button>
-        <button class="pill danger" data-light="all_off"><i data-icon="power"></i> <span data-i18n="all_off">All off</span></button>
-        <button class="pill" id="undoBtn" data-light="undo"><i data-icon="undo"></i> <span data-i18n="undo">Undo</span><span id="undoCount" class="count-badge hidden"></span></button>
-      </div>
-    </section>
-
-    <!-- Vacuum -->
-    <section class="card" id="vacuumCard">
-      <div class="card-head"><h2><i data-icon="vacuum"></i> <span data-i18n="vacuum">Vacuum</span></h2></div>
-      <div id="vacuumReadout" class="readout">—</div>
-
-      <div class="btn-row wrap">
-        <button class="pill" data-vac="sweep"><i data-icon="brush"></i> <span data-i18n="sweep">Sweep</span></button>
-        <button class="pill" data-vac="mop"><i data-icon="droplet"></i> <span data-i18n="mop">Mop</span></button>
-        <button class="pill" data-vac="sweep_mop"><i data-icon="sparkles"></i> <span data-i18n="both">Both</span></button>
-        <button class="pill" data-vac="pause"><i data-icon="pause"></i> <span data-i18n="pause">Pause</span></button>
-        <button class="pill danger hold-btn" id="vacStopBtn"><i data-icon="square"></i> <span data-i18n="stop">Stop</span></button>
-        <button class="pill" data-vac="dock"><i data-icon="home"></i> <span data-i18n="dock">Dock</span></button>
-        <button class="pill" data-vac="find_me"><i data-icon="bell"></i> <span data-i18n="find">Find</span></button>
-      </div>
-
-      <div id="roomsWrap" class="hidden">
-        <div class="subhead" data-i18n="rooms">Rooms</div>
-        <div id="roomChips" class="btn-row wrap"></div>
-        <div class="btn-row wrap">
-          <button class="pill" id="cleanRoomsBtn"><i data-icon="brush"></i> <span data-i18n="clean_rooms">Clean selected rooms</span></button>
+    <div class="content-grid">
+      <!-- Lights -->
+      <section class="card" id="lightsCard">
+        <div class="card-head">
+          <h2><i data-icon="bulb"></i> <span data-i18n="lights">Lights</span></h2>
+          <span id="partyBadge" class="badge hidden"><i data-icon="party"></i><span id="partyBadgeText">party</span></span>
         </div>
-      </div>
 
-      <div class="control-row">
-        <label><span data-i18n="suction">Suction</span>
-          <select id="vacSuction"></select>
-        </label>
-        <label><span data-i18n="water">Water</span>
-          <select id="vacWater"></select>
-        </label>
-      </div>
+        <div class="subhead" data-i18n="target">Target</div>
+        <div id="bulbGrid" class="bulb-grid"></div>
+        <p class="hint" data-i18n="hint_target">Tap bulbs to target them. None selected = all.</p>
+        <div class="btn-row wrap target-power">
+          <button class="pill" id="targetsOn"><i data-icon="power"></i> <span data-i18n="on">On</span></button>
+          <button class="pill danger" id="targetsOff"><i data-icon="power-off"></i> <span data-i18n="off">Off</span></button>
+        </div>
 
-      <div class="subhead" data-i18n="volume">Volume</div>
-      <input type="range" id="vacVolume" min="0" max="10" step="1" value="5" aria-label="Vacuum volume" />
+        <div class="subhead" data-i18n="scenes">Scenes</div>
+        <div id="sceneBtns" class="btn-row wrap"></div>
 
-      <div class="subhead" data-i18n="drive">Manual drive</div>
-      <div class="dpad">
-        <button class="dpad-btn up" data-vac-remote="1" aria-label="Drive forward"><i data-icon="chevron-up"></i></button>
-        <button class="dpad-btn left" data-vac-remote="2" aria-label="Turn left"><i data-icon="chevron-left"></i></button>
-        <button class="dpad-btn stop" id="dpadStop" aria-label="Stop driving"><i data-icon="square"></i></button>
-        <button class="dpad-btn right" data-vac-remote="3" aria-label="Turn right"><i data-icon="chevron-right"></i></button>
-        <button class="dpad-btn down" data-vac-remote="4" aria-label="Drive backward"><i data-icon="chevron-down"></i></button>
-      </div>
+        <div class="subhead" data-i18n="brightness">Brightness</div>
+        <div class="slider-row">
+          <button class="round-btn" data-light="brightness_down" aria-label="Brightness down"><i data-icon="minus"></i></button>
+          <input type="range" id="brightness" min="1" max="100" value="100" aria-label="Brightness" />
+          <button class="round-btn" data-light="brightness_up" aria-label="Brightness up"><i data-icon="plus"></i></button>
+        </div>
 
-      <details id="maintDetails" class="maint">
-        <summary><i data-icon="sliders"></i> <span data-i18n="maintenance">Maintenance</span></summary>
-        <div id="maintBody" class="readout"><span class="hint" data-i18n="loading">Loading…</span></div>
-      </details>
-    </section>
+        <div class="subhead" data-i18n="color">Color</div>
+        <div class="btn-row wrap">
+          <label class="color-pick">
+            <input type="color" id="colorPicker" value="#4cc2ff" aria-label="Pick a color" />
+            <i data-icon="palette"></i><span data-i18n="pick">Pick</span>
+          </label>
+          <div id="colorChips" class="chips"></div>
+        </div>
 
-    <!-- Air purifier -->
-    <section class="card" id="airCard">
-      <div class="card-head"><h2><i data-icon="wind"></i> <span data-i18n="air_purifier">Air purifier</span></h2></div>
-      <div id="airReadout" class="readout">—</div>
+        <div class="subhead" data-i18n="white_temp">White temperature</div>
+        <div class="slider-row warm-cool">
+          <span data-i18n="warm">Warm</span>
+          <input type="range" id="colorTemp" min="1700" max="6500" step="100" value="4000" aria-label="White temperature" />
+          <span data-i18n="cool">Cool</span>
+        </div>
 
-      <div class="btn-row wrap">
-        <button class="pill" data-air-power="on"><i data-icon="power"></i> <span data-i18n="on">On</span></button>
-        <button class="pill danger" data-air-power="off"><i data-icon="power-off"></i> <span data-i18n="off">Off</span></button>
-      </div>
+        <div class="subhead" data-i18n="party_fx">Party &amp; effects</div>
+        <div class="btn-row wrap">
+          <button class="pill" data-light="party_toggle"><i data-icon="party"></i> <span data-i18n="party">Party</span></button>
+          <button class="pill" data-light="cycle_prev"><i data-icon="chevron-left"></i> <span data-i18n="prev">Prev</span></button>
+          <button class="pill" data-light="cycle_start"><i data-icon="palette"></i> <span data-i18n="cycle">Cycle</span></button>
+          <button class="pill" data-light="cycle_next"><span data-i18n="next">Next</span> <i data-icon="chevron-right"></i></button>
+          <button class="pill" data-light="random_color"><i data-icon="shuffle"></i> <span data-i18n="random">Random</span></button>
+          <button class="pill" data-light="random_each"><i data-icon="shuffle"></i> <span data-i18n="each">Each</span></button>
+        </div>
+        <div id="patternWrap" class="hidden">
+          <div class="subhead" data-i18n="pattern">Dance pattern</div>
+          <div id="patternRow" class="btn-row wrap"></div>
+        </div>
+        <div class="btn-row wrap">
+          <button class="pill" data-light="full_bright"><i data-icon="sun"></i> <span data-i18n="full">Full</span></button>
+          <button class="pill danger" data-light="all_off"><i data-icon="power"></i> <span data-i18n="all_off">All off</span></button>
+          <button class="pill" id="undoBtn" data-light="undo"><i data-icon="undo"></i> <span data-i18n="undo">Undo</span><span id="undoCount" class="count-badge hidden"></span></button>
+        </div>
+      </section>
 
-      <div class="subhead" data-i18n="mode">Mode</div>
-      <div id="airModes" class="btn-row wrap"></div>
+      <!-- Vacuum -->
+      <section class="card" id="vacuumCard">
+        <div class="card-head"><h2><i data-icon="vacuum"></i> <span data-i18n="vacuum">Vacuum</span></h2></div>
+        <div id="vacuumReadout" class="readout">—</div>
 
-      <div class="subhead" data-i18n="fan">Fan level</div>
-      <div id="airFan" class="btn-row wrap"></div>
+        <div class="btn-row wrap">
+          <button class="pill" data-vac="sweep"><i data-icon="brush"></i> <span data-i18n="sweep">Sweep</span></button>
+          <button class="pill" data-vac="mop"><i data-icon="droplet"></i> <span data-i18n="mop">Mop</span></button>
+          <button class="pill" data-vac="sweep_mop"><i data-icon="sparkles"></i> <span data-i18n="both">Both</span></button>
+          <button class="pill" data-vac="pause"><i data-icon="pause"></i> <span data-i18n="pause">Pause</span></button>
+          <button class="pill danger hold-btn" id="vacStopBtn"><i data-icon="square"></i> <span data-i18n="stop">Stop</span></button>
+          <button class="pill" data-vac="dock"><i data-icon="home"></i> <span data-i18n="dock">Dock</span></button>
+          <button class="pill" data-vac="find_me"><i data-icon="bell"></i> <span data-i18n="find">Find</span></button>
+        </div>
 
-      <div class="subhead" data-i18n="fav_speed">Favorite speed (RPM)</div>
-      <input type="range" id="airFavSpeed" min="200" max="2300" step="50" value="800" aria-label="Favorite speed" />
+        <div id="roomsWrap" class="hidden">
+          <div class="subhead" data-i18n="rooms">Rooms</div>
+          <div id="roomChips" class="btn-row wrap"></div>
+          <div class="btn-row wrap">
+            <button class="pill" id="cleanRoomsBtn"><i data-icon="brush"></i> <span data-i18n="clean_rooms">Clean selected rooms</span></button>
+          </div>
+        </div>
 
-      <div class="control-row">
-        <label><span data-i18n="screen">Screen</span>
-          <select id="airScreen"></select>
-        </label>
-      </div>
-      <div class="btn-row wrap toggles">
-        <button class="pill toggle" data-air-toggle="anion"><i data-icon="sparkles"></i> <span data-i18n="ionizer">Ionizer</span></button>
-        <button class="pill toggle" data-air-toggle="child_lock"><i data-icon="lock"></i> <span data-i18n="child_lock">Child lock</span></button>
-        <button class="pill toggle" data-air-toggle="buzzer"><i data-icon="volume"></i> <span data-i18n="buzzer">Buzzer</span></button>
-      </div>
-    </section>
+        <div class="control-row">
+          <label><span data-i18n="suction">Suction</span>
+            <select id="vacSuction"></select>
+          </label>
+          <label><span data-i18n="water">Water</span>
+            <select id="vacWater"></select>
+          </label>
+        </div>
 
-    <!-- Camera -->
-    <section class="card" id="cameraCard">
-      <div class="card-head"><h2><i data-icon="camera"></i> <span data-i18n="camera">Camera</span></h2></div>
-      <div class="btn-row wrap">
-        <button class="pill" id="captureBtn"><i data-icon="camera"></i> <span data-i18n="capture">Capture</span></button>
-        <button class="pill" id="captureFlashBtn"><i data-icon="zap"></i> <span data-i18n="capture_flash">Capture + flash</span></button>
-      </div>
-      <div id="momentLatest" class="moment-latest"></div>
-      <div id="momentGallery" class="gallery"></div>
-    </section>
+        <div class="subhead" data-i18n="volume">Volume</div>
+        <input type="range" id="vacVolume" min="0" max="10" step="1" value="5" aria-label="Vacuum volume" />
 
-    <!-- Touch-panel alert -->
-    <section class="card" id="panelAlertCard">
-      <div class="card-head"><h2><i data-icon="bell"></i> <span data-i18n="panel_alert">Panel alert</span></h2></div>
-      <p class="hint" data-i18n="panel_alert_hint">Pop a message up on the wall touch panel (Latin text only).</p>
-      <form id="alertForm" class="chat-form alert-form">
-        <input type="text" id="alertText" maxlength="200" data-i18n-ph="panel_alert_placeholder" placeholder="e.g. Dinner is ready!" autocomplete="off" />
-        <button type="submit" class="pill"><i data-icon="bell"></i> <span data-i18n="panel_send_notice">Notice</span></button>
-        <button type="button" class="pill danger" id="alertUrgent"><i data-icon="bell"></i> <span data-i18n="panel_send_alert">Alert</span></button>
-      </form>
-    </section>
+        <div class="subhead" data-i18n="drive">Manual drive</div>
+        <div class="dpad">
+          <button class="dpad-btn up" data-vac-remote="1" aria-label="Drive forward"><i data-icon="chevron-up"></i></button>
+          <button class="dpad-btn left" data-vac-remote="2" aria-label="Turn left"><i data-icon="chevron-left"></i></button>
+          <button class="dpad-btn stop" id="dpadStop" aria-label="Stop driving"><i data-icon="square"></i></button>
+          <button class="dpad-btn right" data-vac-remote="3" aria-label="Turn right"><i data-icon="chevron-right"></i></button>
+          <button class="dpad-btn down" data-vac-remote="4" aria-label="Drive backward"><i data-icon="chevron-down"></i></button>
+        </div>
 
-    <!-- Assistant (optional) -->
-    <section class="card hidden" id="assistantCard">
-      <div class="card-head"><h2><i data-icon="chat"></i> <span data-i18n="khatoon">Khatoon</span></h2></div>
-      <p class="hint" data-i18n="chat_hint">Ask in plain language — she can read sensors and control devices.</p>
-      <div id="chatLog" class="chat-log"></div>
-      <form id="chatForm" class="chat-form">
-        <input type="text" id="chatInput" data-i18n-ph="chat_placeholder" placeholder="e.g. Set the lights warm and start the vacuum" autocomplete="off" />
-        <button type="submit" class="pill"><i data-icon="send"></i> <span data-i18n="send">Send</span></button>
-      </form>
-    </section>
+        <details id="maintDetails" class="maint">
+          <summary><i data-icon="sliders"></i> <span data-i18n="maintenance">Maintenance</span></summary>
+          <div id="maintBody" class="readout"><span class="hint" data-i18n="loading">Loading…</span></div>
+        </details>
+      </section>
+
+      <!-- Air purifier -->
+      <section class="card" id="airCard">
+        <div class="card-head"><h2><i data-icon="wind"></i> <span data-i18n="air_purifier">Air purifier</span></h2></div>
+        <div id="airReadout" class="readout">—</div>
+
+        <div class="btn-row wrap">
+          <button class="pill" data-air-power="on"><i data-icon="power"></i> <span data-i18n="on">On</span></button>
+          <button class="pill danger" data-air-power="off"><i data-icon="power-off"></i> <span data-i18n="off">Off</span></button>
+        </div>
+
+        <div class="subhead" data-i18n="mode">Mode</div>
+        <div id="airModes" class="btn-row wrap"></div>
+
+        <div class="subhead" data-i18n="fan">Fan level</div>
+        <div id="airFan" class="btn-row wrap"></div>
+
+        <div class="subhead" data-i18n="fav_speed">Favorite speed (RPM)</div>
+        <input type="range" id="airFavSpeed" min="200" max="2300" step="50" value="800" aria-label="Favorite speed" />
+
+        <div class="control-row">
+          <label><span data-i18n="screen">Screen</span>
+            <select id="airScreen"></select>
+          </label>
+        </div>
+        <div class="btn-row wrap toggles">
+          <button class="pill toggle" data-air-toggle="anion"><i data-icon="sparkles"></i> <span data-i18n="ionizer">Ionizer</span></button>
+          <button class="pill toggle" data-air-toggle="child_lock"><i data-icon="lock"></i> <span data-i18n="child_lock">Child lock</span></button>
+          <button class="pill toggle" data-air-toggle="buzzer"><i data-icon="volume"></i> <span data-i18n="buzzer">Buzzer</span></button>
+        </div>
+      </section>
+
+      <!-- Camera -->
+      <section class="card" id="cameraCard">
+        <div class="card-head"><h2><i data-icon="camera"></i> <span data-i18n="camera">Camera</span></h2></div>
+        <div class="btn-row wrap">
+          <button class="pill" id="captureBtn"><i data-icon="camera"></i> <span data-i18n="capture">Capture</span></button>
+          <button class="pill" id="captureFlashBtn"><i data-icon="zap"></i> <span data-i18n="capture_flash">Capture + flash</span></button>
+        </div>
+        <div id="momentLatest" class="moment-latest"></div>
+        <div id="momentGallery" class="gallery"></div>
+      </section>
+
+      <!-- Assistant (optional) -->
+      <section class="card hidden" id="assistantCard">
+        <div class="card-head"><h2><i data-icon="chat"></i> <span data-i18n="khatoon">Khatoon</span></h2></div>
+        <p class="hint" data-i18n="chat_hint">Ask in plain language — she can read sensors and control devices.</p>
+        <div id="chatLog" class="chat-log"></div>
+        <form id="chatForm" class="chat-form">
+          <input type="text" id="chatInput" data-i18n-ph="chat_placeholder" placeholder="e.g. Set the lights warm and start the vacuum" autocomplete="off" />
+          <button type="submit" class="pill"><i data-icon="send"></i> <span data-i18n="send">Send</span></button>
+        </form>
+      </section>
+    </div>
   </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-tab active" data-tab="home" aria-label="Home">
+      <span class="nav-icon"><i data-icon="home"></i></span>
+      <span class="nav-text" data-i18n="home">Home</span>
+    </button>
+    <button class="nav-tab" data-tab="lights" aria-label="Lights">
+      <span class="nav-icon"><i data-icon="bulb"></i></span>
+      <span class="nav-text" data-i18n="lights">Lights</span>
+    </button>
+    <button class="nav-tab" data-tab="appliances" aria-label="Devices">
+      <span class="nav-icon"><i data-icon="sliders"></i></span>
+      <span class="nav-text" data-i18n="devices">Devices</span>
+    </button>
+    <button class="nav-tab" data-tab="camera" aria-label="Camera">
+      <span class="nav-icon"><i data-icon="camera"></i></span>
+      <span class="nav-text" data-i18n="camera">Camera</span>
+    </button>
+    <button class="nav-tab hidden" data-tab="chat" aria-label="Assistant">
+      <span class="nav-icon"><i data-icon="chat"></i></span>
+      <span class="nav-text" data-i18n="khatoon">Khatoon</span>
+    </button>
+  </nav>
 
   <div id="toast" class="toast"></div>
   <script src="/static/app.js"></script>
