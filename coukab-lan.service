@@ -1,0 +1,36 @@
+# Coukab LAN — systemd unit
+#
+# User service (typical: runs as your login user, uses %h = home directory):
+#   mkdir -p ~/.config/systemd/user
+#   cp coukab-lan.service ~/.config/systemd/user/
+#   # Edit paths below if the project is not ~/coukab_lan
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now coukab-lan.service
+#
+# Start at boot without an interactive login:
+#   sudo loginctl enable-linger "$USER"
+#
+# evdev needs read access to /dev/input/* — add your user to the input group, then re-login:
+#   sudo usermod -aG input "$USER"
+#
+# System-wide install instead: copy to /etc/systemd/system/, set User=/Group/ paths,
+# change WantedBy=multi-user.target, run: sudo systemctl daemon-reload && sudo systemctl enable --now coukab-lan
+
+[Unit]
+Description=Coukab LAN home automation (main.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/coukab_lan
+ExecStart=%h/coukab_lan/venv/bin/python %h/coukab_lan/main.py
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=coukab-lan
+
+[Install]
+WantedBy=default.target

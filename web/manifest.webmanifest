@@ -1,0 +1,12 @@
+{
+  "name": "Coukab Control",
+  "short_name": "Coukab",
+  "description": "LAN home control — lights, vacuum, air purifier, camera",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070a16",
+  "theme_color": "#070a16",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

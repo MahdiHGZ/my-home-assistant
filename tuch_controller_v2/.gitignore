@@ -1,0 +1,6 @@
+# Generated desktop previews and host-renderer build artifacts
+preview/
+tools/host_preview/build/
+
+# Local Wi-Fi / server credentials
+secrets.h

@@ -1,0 +1,12 @@
+evdev
+opencv-python
+python-miio
+pytapo
+python-dotenv
+yeelight
+# Optional — only needed for the local LLM brain (brain.py / brain_test.py).
+# Model: Gemma 4 E2B QAT GGUF (see brain_model/model_choice_design.md).
+# On the AVX2 CPU server, build the CPU wheel so inference uses AVX2:
+#   CMAKE_ARGS="-DGGML_NATIVE=on" pip install --no-binary llama-cpp-python llama-cpp-python
+# llama-cpp-python
+# huggingface_hub[cli]   # convenience for `hf download` (or use curl)

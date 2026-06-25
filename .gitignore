@@ -1,0 +1,31 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+token.txt
+**/secrets.h
+tuch_controller/secrets.h
+tuch_controller_v2/secrets.h
+tuch_controller_v3/secrets.h
+*credentials*
+*.pem
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.claude/settings.local.json
+
+# Local data and models
+moments/
+brain_model/
+
+# Build artifacts and generated previews
+**/preview/
+tools/host_preview/build/
