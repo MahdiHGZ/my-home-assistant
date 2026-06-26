@@ -52,8 +52,8 @@
 // --------------------------------------------------
 // Timing
 // --------------------------------------------------
-const uint16_t HTTP_TIMEOUT_MS    = 6000;
-const uint16_t STATUS_TIMEOUT_MS  = 10000;
+const uint16_t HTTP_TIMEOUT_MS    = 3500;
+const uint16_t STATUS_TIMEOUT_MS  = 2500;
 // Default screen-off timeout; user-adjustable on the SETUP page (30/60/120 s,
 // stored in NVS). The backlight dims at half this value.
 const unsigned long OFF_AFTER_MS  = 60000;

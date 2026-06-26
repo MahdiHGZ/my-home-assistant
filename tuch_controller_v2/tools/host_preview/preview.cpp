@@ -63,7 +63,7 @@ static void sampleState() {
   st.valid = true;
   st.lightsAvail = true; st.bulbsOn = 6; st.bulbsTotal = 6;
   strlcpy(st.lightMode, "warm white", sizeof(st.lightMode));
-  st.vacAvail = true; strlcpy(st.vacStatus, "Charging", sizeof(st.vacStatus)); st.vacBattery = 100;
+  st.vacAvail = true; strlcpy(st.vacStatus, "Charging Complete", sizeof(st.vacStatus)); st.vacBattery = 100;
   st.purAvail = true; st.purOn = true;
   strlcpy(st.purMode, "Auto", sizeof(st.purMode));
   strlcpy(st.purFan, "Medium", sizeof(st.purFan));

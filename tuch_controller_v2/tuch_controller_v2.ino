@@ -199,7 +199,7 @@ struct DeviceState {
   char lightMode[16] = "";   // lights.state.last_mode (BulbMode.name)
 
   bool vacAvail = false;
-  char vacStatus[16] = "";
+  char vacStatus[24] = "";
   int vacBattery = -1;
 
   bool purAvail = false;
@@ -295,6 +295,10 @@ WiFiClient sseClient;
 char sseLine[10];
 uint8_t sseLineLen = 0;
 unsigned long lastSseAttempt = 0;
+
+#define SSE_RETRY_FAST_MS 1000UL
+#define SSE_RETRY_SLOW_MS 3000UL
+#define SSE_CONNECT_TIMEOUT_MS 700
 
 // Runtime touch calibration (defaults from config.h, NVS overrides).
 int tsMinX = TS_MINX, tsMaxX = TS_MAXX, tsMinY = TS_MINY, tsMaxY = TS_MAXY;
@@ -742,6 +746,48 @@ void drawLeftText(const char* text, int16_t x, int16_t y, uint8_t size, uint16_t
   tft.setFont(nullptr);
 }
 
+uint16_t textWidthPx(const char* text, uint8_t size) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  setFontFor(size);
+  tft.getTextBounds(text ? text : "", 0, 0, &x1, &y1, &w, &h);
+  tft.setFont(nullptr);
+  return w;
+}
+
+void fitTextToWidth(const char* text, char* out, size_t n, uint8_t size, int16_t maxW) {
+  if (n == 0) return;
+  if (maxW <= 0) { out[0] = '\0'; return; }
+
+  strlcpy(out, text ? text : "", n);
+  if (textWidthPx(out, size) <= maxW) return;
+
+  char base[48];
+  strlcpy(base, out, sizeof(base));
+  while (base[0]) {
+    base[strlen(base) - 1] = '\0';
+    snprintf(out, n, "%s..", base);
+    if (textWidthPx(out, size) <= maxW) return;
+  }
+
+  strlcpy(out, "..", n);
+  if (textWidthPx(out, size) > maxW) out[0] = '\0';
+}
+
+void drawCenteredTextFit(const char* text, int16_t cx, int16_t cy, uint8_t size,
+                         uint16_t color, int16_t maxW) {
+  char fitted[48];
+  fitTextToWidth(text, fitted, sizeof(fitted), size, maxW);
+  drawCenteredText(fitted, cx, cy, size, color);
+}
+
+void drawLeftTextFit(const char* text, int16_t x, int16_t y, uint8_t size,
+                     uint16_t color, int16_t maxW) {
+  char fitted[48];
+  fitTextToWidth(text, fitted, sizeof(fitted), size, maxW);
+  drawLeftText(fitted, x, y, size, color);
+}
+
 // =====================================================================
 // Dynamic Island — a matte-black status pill (top-center, every page) that
 // holds the clock / page title and morphs to show toasts & alerts, with a
@@ -750,11 +796,11 @@ void drawLeftText(const char* text, int16_t x, int16_t y, uint8_t size, uint16_t
 // The island is a tab that hangs from the top wall: its top edge is flush with
 // y=0 (the top "cut it off"), only the BOTTOM corners are rounded — like a
 // notch bulging down into the screen.
-#define ISL_X 90
+#define ISL_X 70
 #define ISL_Y 0
-#define ISL_W 140
-#define ISL_H 24
-#define ISL_R 10
+#define ISL_W 180
+#define ISL_H 32
+#define ISL_R 14
 #define ISL_CX (ISL_X + ISL_W / 2)
 #define ISL_CY (ISL_Y + ISL_H / 2)
 
@@ -797,7 +843,7 @@ void islandDots() {
 // size 2 = bold font for the clock/title; size 1 = small, for longer toasts.
 void islandText(const char* msg, uint16_t color, uint8_t size) {
   tft.fillRect(ISL_X + 36, ISL_Y + 2, ISL_W - 78, ISL_H - 4, 0x0000);
-  drawCenteredText(msg, ISL_CX, ISL_CY, size, color);
+  drawCenteredTextFit(msg, ISL_CX, ISL_CY, size, color, ISL_W - 84);
 }
 
 // Resting content: clock on MAIN, page title elsewhere (bold).
@@ -1039,9 +1085,11 @@ void drawColorPreview() {
   drawCenteredText(hex, X + W / 2, Y + H / 2, 1, txt);
 }
 
+static uint16_t vacStateLabel(char* out, size_t n);
+
 void cardSubText(Btn& b, const char* text, uint16_t color) {
   glassErase(b.x + 3, b.y + 64, b.w - 6, 16, b.y, b.h, GS_NORMAL);
-  drawCenteredText(text, b.x + b.w / 2, b.y + 72, 1, color);
+  drawCenteredTextFit(text, b.x + b.w / 2, b.y + 72, 1, color, b.w - 12);
 }
 
 void drawCardSub(Btn& b) {
@@ -1067,10 +1115,14 @@ void drawCardSub(Btn& b) {
       return;
     case ID_NAV_VACUUM:
       if (!st.vacAvail) { cardSubText(b, "offline", COL_OFFLINE); return; }
-      if (st.vacBattery >= 0) {
-        snprintf(sub, sizeof(sub), "%.9s %d%%", st.vacStatus, st.vacBattery);
-      } else {
-        snprintf(sub, sizeof(sub), "%.12s", st.vacStatus);
+      {
+        char label[16];
+        vacStateLabel(label, sizeof(label));
+        if (st.vacBattery >= 0) {
+          snprintf(sub, sizeof(sub), "%s %d%%", label, st.vacBattery);
+        } else {
+          strlcpy(sub, label, sizeof(sub));
+        }
       }
       cardSubText(b, sub, COL_SUB);
       return;
@@ -1167,7 +1219,11 @@ void drawDashboardTile(Btn& b, bool pressed) {
       break;
     case ID_NAV_VACUUM:
       accent = UI_SKY;
-      if (st.valid && st.vacAvail) strlcpy(value, st.vacStatus[0] ? st.vacStatus : "ready", sizeof(value));
+      if (st.valid && st.vacAvail) {
+        char label[16];
+        vacStateLabel(label, sizeof(label));
+        strlcpy(value, label[0] && strcmp(label, "—") != 0 ? label : "ready", sizeof(value));
+      }
       else strlcpy(value, st.valid ? "offline" : "syncing", sizeof(value));
       break;
     case ID_NAV_AIR:
@@ -1215,16 +1271,18 @@ void drawDashboardTile(Btn& b, bool pressed) {
     tft.fillCircle(b.x + b.w - 13, b.y + 13, 3, glow ? accent : UI_BORDER);
   }
 
-  drawLeftText(name, b.x + 8, b.y + b.h - 28, 1, UI_DIM);
-  drawLeftText(value, b.x + 8, b.y + b.h - 14, 1,
-               (b.id == ID_NAV_AIR && glow) ? UI_EMERALD : UI_TEXT);
+  drawLeftTextFit(name, b.x + 8, b.y + b.h - 28, 1, UI_DIM, b.w - 16);
+  drawLeftTextFit(value, b.x + 8, b.y + b.h - 14, 1,
+                  (b.id == ID_NAV_AIR && glow) ? UI_EMERALD : UI_TEXT,
+                  b.w - 16);
 }
 
 void drawCompactButton(Btn& b, const char* text, uint16_t accent, bool pressed, bool active) {
   uint16_t border = active ? uiTint(accent, 105) : UI_BORDER;
   uint16_t fill = active ? uiTint(accent, 28) : uiPanelFill(pressed);
   softPanel(b.x, b.y, b.w, b.h, (b.h >= 44) ? 12 : 9, border, fill);
-  drawCenteredText(text, b.x + b.w / 2, b.y + b.h / 2, 1, active ? accent : UI_TEXT);
+  drawCenteredTextFit(text, b.x + b.w / 2, b.y + b.h / 2, 1,
+                      active ? accent : UI_TEXT, b.w - 10);
 }
 
 bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
@@ -1256,7 +1314,7 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
       if (b.id == ID_MODE5) iconPlay(b.x + 25, cy, c);
       else if (b.id == ID_MODE4) iconHeart(b.x + 25, cy, c);
       else iconDots(b.x + 25, cy, c);
-      drawLeftText(label, b.x + 44, cy - 4, 1, UI_TEXT);
+      drawLeftTextFit(label, b.x + 44, cy - 4, 1, UI_TEXT, b.w - 50);
       return true;
     }
     if (b.id == ID_COLOR_PAGE) {
@@ -1305,7 +1363,9 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
                 active ? uiTint(c, 28) : uiPanelFill(pressed));
       if (b.id == ID_VAC_START) iconPlay(b.x + 45, cy, UI_EMERALD);
       else iconStopSq(b.x + 45, cy, UI_MUTED);
-      drawLeftText(b.label, b.x + 66, cy - 4, 1, (b.id == ID_VAC_START) ? UI_EMERALD : UI_MUTED);
+      drawLeftTextFit(b.label, b.x + 66, cy - 4, 1,
+                      (b.id == ID_VAC_START) ? UI_EMERALD : UI_MUTED,
+                      b.w - 74);
       return true;
     }
     if (b.id >= ID_VAC_DOCK && b.id <= ID_VAC_FIND) {
@@ -1343,19 +1403,19 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
       tft.drawFastVLine(cx - 20, cy + 8, 12, UI_EMERALD);
       tft.drawFastHLine(cx + 8, cy + 20, 12, UI_EMERALD);
       tft.drawFastVLine(cx + 20, cy + 8, 12, UI_EMERALD);
-      drawCenteredText("ROOM EYE LIVE", cx, cy, 1, UI_MUTED);
+      drawCenteredTextFit("ROOM EYE LIVE", cx, cy, 1, UI_MUTED, b.w - 16);
       return true;
     }
     if (b.id == ID_CAP) {
       softPanel(b.x, b.y, b.w, b.h, 12, uiTint(UI_ROSE, 80), uiTint(UI_ROSE, pressed ? 50 : 28));
       iconCamera(cx, cy - 12, UI_ROSE, uiTint(UI_ROSE, 28));
-      drawCenteredText("CAPTURE", cx, cy + 18, 1, UI_ROSE);
+      drawCenteredTextFit("CAPTURE", cx, cy + 18, 1, UI_ROSE, b.w - 12);
       return true;
     }
     if (b.id == ID_CAP_FLASH) {
       softPanel(b.x, b.y, b.w, b.h, 9, UI_BORDER, uiPanelFill(pressed));
       iconSun(b.x + 24, cy, UI_AMBER);
-      drawCenteredText("FLASH", cx + 14, cy, 1, UI_AMBER);
+      drawCenteredTextFit("FLASH", cx + 14, cy, 1, UI_AMBER, b.w - 42);
       return true;
     }
   }
@@ -1371,7 +1431,7 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
         tft.fillCircle(cx, b.y + 10, 1, c);
         tft.fillRect(cx - 1, b.y + 14, 3, 6, c);
       }
-      drawCenteredText(b.label, cx, b.y + 31, 1, UI_TEXT);
+      drawCenteredTextFit(b.label, cx, b.y + 31, 1, UI_TEXT, b.w - 8);
       return true;
     }
     if (b.id == ID_SET_THEME) {
@@ -1703,7 +1763,7 @@ void drawVacStatusCard() {
   uint16_t sc = vacStateLabel(label, sizeof(label));
   drawLeftText("CURRENT STATE", X + 12, Y + 11, 1, UI_DIM);
   tft.fillCircle(X + 15, Y + 30, 3, sc);
-  drawLeftText(label, X + 24, Y + 25, 1, UI_TEXT);
+  drawLeftTextFit(label, X + 24, Y + 25, 1, UI_TEXT, W - 132);
 
   if (st.vacBattery >= 0) {
     int pct = constrain(st.vacBattery, 0, 100);
@@ -1723,14 +1783,14 @@ static inline int16_t airTileX(int idx) { return 12 + idx * 101; }   // w=94, gu
 void airTileValue(int idx, const char* value, uint16_t color) {
   int16_t x = airTileX(idx);
   tft.fillRect(x + 4, AIR_TY + 20, 86, 30, UI_PANEL);
-  drawCenteredText(value, x + 47, AIR_TY + 31, 1, color);
+  drawCenteredTextFit(value, x + 47, AIR_TY + 31, 1, color, 82);
 }
 
 void airTileMetric(int idx, const char* value, const char* quality, uint16_t color) {
   int16_t x = airTileX(idx);
   tft.fillRect(x + 4, AIR_TY + 18, 86, 32, UI_PANEL);
-  drawCenteredText(value,   x + 47, AIR_TY + 29, 1, color);
-  drawCenteredText(quality, x + 47, AIR_TY + 45, 1, color);
+  drawCenteredTextFit(value,   x + 47, AIR_TY + 29, 1, color, 82);
+  drawCenteredTextFit(quality, x + 47, AIR_TY + 45, 1, color, 82);
 }
 
 void drawAirValues() {
@@ -1763,7 +1823,7 @@ void drawAirTiles() {
   for (int i = 0; i < 3; i++) {
     int16_t x = airTileX(i);
     softPanel(x, AIR_TY, 94, AIR_TH, 12, UI_BORDER, UI_PANEL);
-    drawCenteredText(labels[i], x + 47, AIR_TY + 10, 1, UI_DIM);
+    drawCenteredTextFit(labels[i], x + 47, AIR_TY + 10, 1, UI_DIM, 86);
   }
   drawAirValues();
 }
@@ -1897,6 +1957,13 @@ void setBacklight(BlState s) {
   analogWrite(TFT_BL, duty);
 }
 
+void setRadioInteractive(bool interactive) {
+  if (!ENABLE_WIFI) return;
+  // Modem sleep saves power, but it adds noticeable LAN latency. Keep it off
+  // while the screen is usable; re-enable only for the idle sleep ladder.
+  WiFi.setSleep(!interactive && SLEEP_ENABLED);
+}
+
 // --------------------------------------------------
 // Sleep ladder (see "Power management" near the top).
 //   light sleep: CPU halts between events, Wi-Fi/RAM/SSE preserved; wakes on a
@@ -1937,6 +2004,7 @@ void wakeScreen() {
   currentPage = PAGE_MAIN;    // always wake on the main page
   drawPage();
   setBacklight(BL_FULL);      // reveal the finished frame — no white flash
+  setRadioInteractive(true);
   if (!sseClient.connected()) needSync = true;  // we may have missed pushes
   Serial.println("Screen on.");
 }
@@ -1948,6 +2016,7 @@ void updateBacklight() {
       screenOn = false;
       screenOffSince = millis();   // start of the light-sleep window
       setBacklight(BL_OFF);
+      setRadioInteractive(false);
       Serial.println("Screen off (inactivity).");
     }
   } else if (idle >= offAfterMs / 2) {
@@ -1997,9 +2066,10 @@ void pumpSSE() {
   if (!ENABLE_WIFI || WiFi.status() != WL_CONNECTED) return;
 
   if (!sseClient.connected()) {
-    if (millis() - lastSseAttempt < 5000) return;
+    unsigned long retryMs = serverReachable ? SSE_RETRY_FAST_MS : SSE_RETRY_SLOW_MS;
+    if (millis() - lastSseAttempt < retryMs) return;
     lastSseAttempt = millis();
-    if (sseClient.connect(API_HOST, API_PORT, 3000)) {
+    if (sseClient.connect(API_HOST, API_PORT, SSE_CONNECT_TIMEOUT_MS)) {
       sseClient.print(String("GET /api/events HTTP/1.1\r\nHost: ") + API_HOST +
                       "\r\nAccept: text/event-stream\r\nX-Coukab-Panel: 1"
                       "\r\nConnection: keep-alive\r\n\r\n");
@@ -2141,6 +2211,21 @@ bool enqueueJob(ApiJob& job) {
   return apiQueue && xQueueSend(apiQueue, &job, 0) == pdTRUE;
 }
 
+void dropQueuedStatusJobs() {
+  if (!apiQueue) return;
+  ApiJob kept[8];
+  int keep = 0;
+  ApiJob j;
+  while (xQueueReceive(apiQueue, &j, 0) == pdTRUE) {
+    if (j.type == JOB_STATUS) {
+      statusFetchQueued = false;
+      continue;
+    }
+    if (keep < (int)(sizeof(kept) / sizeof(kept[0]))) kept[keep++] = j;
+  }
+  for (int i = 0; i < keep; i++) xQueueSend(apiQueue, &kept[i], 0);
+}
+
 void apiAndReportLong(const char* path, const String& body, const char* okMsg,
                       uint32_t timeoutMs) {
   ApiJob job;
@@ -2149,6 +2234,7 @@ void apiAndReportLong(const char* path, const String& body, const char* okMsg,
   strlcpy(job.path, path, sizeof(job.path));
   strlcpy(job.body, body.c_str(), sizeof(job.body));
   strlcpy(job.okMsg, okMsg, sizeof(job.okMsg));
+  dropQueuedStatusJobs();  // user taps outrank stale background refreshes
   if (enqueueJob(job)) {
     drawToast("sending...", COL_ACCENT);
   } else {
@@ -2356,7 +2442,7 @@ void showDeviceInfo() {
     int16_t vx = col == 0 ? 76 : 238;
     int16_t y = 44 + row * 16;
     drawLeftText(k, x, y, 1, UI_DIM);
-    drawLeftText(val, vx, y, 1, c);
+    drawLeftTextFit(val, vx, y, 1, c, col == 0 ? 78 : 68);
   };
 
   row(0, 0, "DEVICE", OTA_HOSTNAME, UI_TEXT);
@@ -3077,9 +3163,9 @@ void setup() {
   resultQueue = xQueueCreate(8, sizeof(ApiResult));
   xTaskCreatePinnedToCore(apiWorkerTask, "apiWorker", 8192, nullptr, 1, nullptr, 0);
 
-  // Wi-Fi modem sleep lets the radio idle between DTIM beacons during light
-  // sleep without dropping the association (so SSE/alerts survive).
-  if (SLEEP_ENABLED) WiFi.setSleep(true);
+  // Keep the radio awake while the UI is active; modem sleep is enabled again
+  // only when the screen goes off.
+  setRadioInteractive(true);
   setupWiFi();
 
   lastActivityMs = millis();
@@ -3088,6 +3174,7 @@ void setup() {
     // fetch-then-resleep. Don't waste a status fetch.
     screenOn = false;
     screenOffSince = millis();
+    setRadioInteractive(false);
     needSync = false;
     Serial.println("Woke for alert poll (screen stays off).");
   } else {
@@ -3126,6 +3213,7 @@ void loop() {
   while (resultQueue && xQueueReceive(resultQueue, &res, 0) == pdTRUE) {
     if (res.type == RES_TOAST) {
       lastActionMs = millis();
+      if (res.ok) statusPokePending = true;  // reconcile optimistic UI quickly
       if (screenOn && !previewActive) {
         if (res.ok) drawToast(res.text, COL_OK);
         else drawToastAlarm(res.text);
