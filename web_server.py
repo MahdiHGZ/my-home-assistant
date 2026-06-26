@@ -414,6 +414,23 @@ def _cached_status(controller) -> dict:
     return _build_status(controller)
 
 
+def _panel_cached_status(controller) -> dict:
+    """Return panel status immediately when any snapshot exists.
+
+    The ESP32 polls this on wake/SSE pokes and has a tiny HTTP timeout. A stale
+    but recent-looking panel is better than blocking behind slow vacuum/purifier
+    reads; the SSE notifier refreshes the cache in the background.
+    """
+    global _last_status, _last_status_time
+    now = time.time()
+    with _last_status_lock:
+        if _last_status is not None:
+            if (now - _last_status_time) >= _STATUS_CACHE_TTL_S:
+                _status_dirty.set()
+            return _last_status
+    return _build_status(controller)
+
+
 # -- panel API (ESP32 touch controller) ----------------------------------------
 #
 # The touch panel is a constrained client: it wants a tiny, flat, stable
@@ -428,7 +445,7 @@ def _cached_status(controller) -> dict:
 
 def _panel_status(controller) -> dict:
     """Flat ~250-byte summary of the cached status for the touch panel."""
-    return panel.flatten_status(_cached_status(controller))
+    return panel.flatten_status(_panel_cached_status(controller))
 
 
 def _panel_moment_rgb565(name: str | None, w: int, h: int) -> bytes:
