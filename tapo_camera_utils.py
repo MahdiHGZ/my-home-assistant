@@ -156,6 +156,7 @@ def capture_moment(cap: cv2.VideoCapture) -> Path | None:
     """
     _require_dependencies()
     MOMENTS_DIR.mkdir(exist_ok=True)
+    (MOMENTS_DIR / ".thumbs").mkdir(exist_ok=True)
     ret, frame = cap.read()
     if not ret:
         logger.error("Failed to read frame from camera.")
@@ -163,6 +164,17 @@ def capture_moment(cap: cv2.VideoCapture) -> Path | None:
     filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".jpg"
     filepath = MOMENTS_DIR / filename
     cv2.imwrite(str(filepath), frame)
+    
+    # Save a 256px thumbnail
+    thumb_path = MOMENTS_DIR / ".thumbs" / filename
+    h, w = frame.shape[:2]
+    scale = 256.0 / float(w)
+    if scale < 1.0:
+        thumb_frame = cv2.resize(frame, (256, int(h * scale)))
+    else:
+        thumb_frame = frame
+    cv2.imwrite(str(thumb_path), thumb_frame)
+
     logger.info("Moment saved: %s", filepath)
     return filepath
 

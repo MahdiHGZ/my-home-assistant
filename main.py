@@ -222,6 +222,10 @@ class Controller:
                 except Exception:
                     logger.exception("on_action callback failed.")
 
+    class QueueFullError(Exception):
+        """Raised when the controller action queue is full."""
+        pass
+
     def run_action(self, fn: Callable[..., object], *args, timeout: float = 60.0, **kwargs):
         """Runs an action on the worker thread and waits for its result.
 
@@ -230,6 +234,9 @@ class Controller:
         is returned to the caller, and any error is re-raised (unlike the
         keypad path, which only logs) so the HTTP layer can report it.
         """
+        if self._queue.qsize() >= 5:
+            raise QueueFullError("Too many pending actions in the queue.")
+
         box: dict[str, object] = {}
         done = threading.Event()
 

@@ -93,9 +93,15 @@ _sse_lock = threading.Lock()
 _status_dirty = threading.Event()
 _controller_ref = None  # set by start()
 
+_STATUS_CACHE_TTL_S = 3.0
+_last_status_time = 0.0
+
 
 def notify_status_changed() -> None:
-    """Schedules a status push to all connected SSE clients."""
+    """Schedules a status push to all connected SSE clients and invalidates cache."""
+    global _last_status_time
+    with _last_status_lock:
+        _last_status_time = 0.0
     _status_dirty.set()
 
 
@@ -160,22 +166,46 @@ def _ensure_chat_ready():
     return brain
 
 
+from collections import deque
+_chat_history = deque(maxlen=6)
+
+def _build_history_prompt(brain_module) -> str:
+    base = brain_module.get_default_system_prompt()
+    if not _chat_history:
+        return base
+    history_text = "\n\nRecent conversation history:\n"
+    for msg in _chat_history:
+        history_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
+    return base + history_text
+
 def _run_chat(message: str) -> str:
-    """Answer one command. Stateless: no conversation memory is kept."""
+    """Answer one command with sliding window memory."""
     with _chat_lock:
         brain = _ensure_chat_ready()
-        return brain.run_prompt(message, use_tools=True)
+        system_prompt = _build_history_prompt(brain)
+        reply = brain.run_prompt(message, system_prompt=system_prompt, use_tools=True)
+        _chat_history.append({"role": "user", "content": message})
+        _chat_history.append({"role": "assistant", "content": reply})
+        return reply
 
 
 def _run_chat_stream(message: str):
-    """Yield assistant events (status/token/done) for one command.
-
-    Stateless single-shot — no history. Holds the chat lock for the whole turn
-    so model access stays serialized with the blocking /api/chat path.
-    """
+    """Yield assistant events (status/token/done) for one command with memory."""
     with _chat_lock:
         brain = _ensure_chat_ready()
-        yield from brain.run_prompt_stream(message, use_tools=True)
+        system_prompt = _build_history_prompt(brain)
+        _chat_history.append({"role": "user", "content": message})
+        
+        reply_buffer = ""
+        for event in brain.run_prompt_stream(message, system_prompt=system_prompt, use_tools=True):
+            if event["type"] == "token":
+                reply_buffer += event["text"]
+            elif event["type"] == "done":
+                # done might contain the final text
+                reply_buffer = event["text"]
+            yield event
+            
+        _chat_history.append({"role": "assistant", "content": reply_buffer.strip()})
 
 
 # -- status helpers -----------------------------------------------------------
@@ -289,6 +319,19 @@ def _moment_files() -> list[Path]:
         if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
     ]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    
+    # Retention policy: Keep max 50 images
+    if len(files) > 50:
+        for p in files[50:]:
+            try:
+                p.unlink()
+                thumb_path = moments_dir / ".thumbs" / p.name
+                if thumb_path.exists():
+                    thumb_path.unlink()
+            except OSError as e:
+                logger.warning("Failed to prune old moment %s: %s", p.name, e)
+        files = files[:50]
+        
     return files
 
 
@@ -302,13 +345,17 @@ def _moments_summary() -> dict:
     }
 
 
-def _resolve_moment(name: str) -> Path:
+def _resolve_moment(name: str, thumb: bool = False) -> Path:
     """Resolve a moment file name to a path inside the moments dir, or raise.
 
     Guards against path traversal and rejects non-image / missing files.
     """
     moments_dir = Path(tapo.MOMENTS_DIR).resolve()
-    path = (moments_dir / name).resolve()
+    
+    path = (moments_dir / ".thumbs" / name).resolve() if thumb else (moments_dir / name).resolve()
+    if thumb and not path.is_file():
+        path = (moments_dir / name).resolve()
+
     if moments_dir not in path.parents:
         raise _ApiError("Invalid file name.", status=400)
     if path.suffix.lower() not in {".jpg", ".jpeg", ".png"} or not path.is_file():
@@ -320,6 +367,9 @@ def _delete_moment(name: str) -> None:
     """Deletes one captured image (validated by :func:`_resolve_moment`)."""
     path = _resolve_moment(name)
     path.unlink()
+    thumb_path = path.parent / ".thumbs" / path.name
+    if thumb_path.exists():
+        thumb_path.unlink()
     logger.info("Moment deleted via web: %s", path.name)
 
 
@@ -332,7 +382,7 @@ _last_status: dict | None = None
 
 
 def _build_status(controller) -> dict:
-    global _last_status
+    global _last_status, _last_status_time
     futures = {
         "lights": _STATUS_POOL.submit(_safe, _lights_status),
         "vacuum": _STATUS_POOL.submit(_safe, _vacuum_status),
@@ -350,13 +400,16 @@ def _build_status(controller) -> dict:
     result["moments"] = _moments_summary()
     with _last_status_lock:
         _last_status = result
+        _last_status_time = time.time()
     return result
 
 
 def _cached_status(controller) -> dict:
-    """Last snapshot if one exists, else a fresh build (and cache it)."""
+    """Returns the cached status if it's less than TTL seconds old, else builds fresh."""
+    global _last_status, _last_status_time
+    now = time.time()
     with _last_status_lock:
-        if _last_status is not None:
+        if _last_status is not None and (now - _last_status_time) < _STATUS_CACHE_TTL_S:
             return _last_status
     return _build_status(controller)
 
@@ -801,9 +854,9 @@ class _Handler(BaseHTTPRequestHandler):
             with _sse_lock:
                 _sse_clients.discard(client)
 
-    def _serve_moment(self, filename: str, *, download: bool = False) -> None:
+    def _serve_moment(self, filename: str, *, download: bool = False, thumb: bool = False) -> None:
         try:
-            path = _resolve_moment(filename)
+            path = _resolve_moment(filename, thumb=thumb)
         except _ApiError as e:
             self._send_json({"ok": False, "error": str(e)}, status=e.status)
             return
@@ -831,8 +884,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._serve_static(_ROOT_STATIC[path])
             elif path == "/api/capabilities":
                 self._send_json(_capabilities())
+            elif path == "/api/health":
+                self._send_json({"ok": True, "status": "running"})
             elif path == "/api/status":
-                self._send_json(_build_status(self._controller))
+                self._send_json(_cached_status(self._controller))
             elif path == "/api/status/cached":
                 self._send_json(_cached_status(self._controller))
             elif path == "/api/panel/status":
@@ -856,7 +911,8 @@ class _Handler(BaseHTTPRequestHandler):
             elif path.startswith("/moments/"):
                 query = self.path.split("?", 1)[1] if "?" in self.path else ""
                 download = "download=1" in query or "download=true" in query
-                self._serve_moment(path.removeprefix("/moments/"), download=download)
+                thumb = "thumb=1" in query or "thumb=true" in query
+                self._serve_moment(path.removeprefix("/moments/"), download=download, thumb=thumb)
             elif path == "/favicon.ico":
                 self._send_bytes(b"", "image/x-icon", status=204)
             else:
@@ -895,7 +951,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(e)}, status=e.status)
         except Exception as e:  # noqa: BLE001
             logger.exception("POST %s failed", path)
-            self._send_json({"ok": False, "error": str(e)}, status=500)
+            if e.__class__.__name__ == "QueueFullError":
+                self._send_json({"ok": False, "error": "Too many requests. Please try again."}, status=429)
+            else:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
 
 
 def lan_ip() -> str:
