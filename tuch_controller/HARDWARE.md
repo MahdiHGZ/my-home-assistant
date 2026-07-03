@@ -60,9 +60,10 @@ Empirically validated on this panel — change with care:
   mappedY = map(p.x, tsMinX, tsMaxX, 0, 240);
   ```
 - Defaults `TS_MINX/MAXX/MINY/MAXY = 250/3800/250/3800` live in `config.h`
-  but are only the fallback: **SETUP → CALIBRATE** (or hold the COUKAB title
-  ~3 s) runs a 4-point calibration and stores the result in NVS namespace
-  `tcal`, which wins over the defaults on every boot.
+  but are only the fallback: **SETUP → CALIBRATE** (or hold the top-left of the
+  MAIN screen — the Dynamic Island — for ~3 s) runs a 4-point calibration and
+  stores the result in NVS namespace `tcal`, which wins over the defaults on
+  every boot.
 - Anti-ghosting: pressure must exceed `TOUCH_MIN_PRESSURE` (250) and the
   same button must be hit on two consecutive 25 ms polls.
 - Hit-slop: touches up to `HIT_SLOP` (8 px) outside a button still land.

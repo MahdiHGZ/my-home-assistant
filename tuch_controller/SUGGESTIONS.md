@@ -20,7 +20,7 @@ or latent bug · P2 = noticeable · P3 = refinement · P4 = polish.**
 ## 1. Design principles
 
 **Accessibility first.** The resistive panel has poor sensitivity, so: big
-targets (≥56×38, most ≥66 px) with 10 px hit-slop, few elements per screen, 1-D
+targets (≥56×38, most ≥66 px) with 8 px hit-slop, few elements per screen, 1-D
 drag bars instead of 2-D pickers, send-on-release, real FreeSansBold labels,
 pressure threshold + two-sample confirm against ghost touches, and on-device
 4-point calibration (NVS).
@@ -47,7 +47,7 @@ probes), and recover automatically (SSE retry 5 s, first snapshot retry 30 s).
   `party_pattern`), pattern name from status.
 - **Color-cycle controls** (P3): start / next / prev mapped to existing actions.
 - **Undo button** (P3) — `{"action":"undo"}`, fits the LIGHTS top bar (mind the
-  conn-icon overlap at top-right).
+  Dynamic Island along the top edge).
 
 ### Vacuum
 - **Rooms page** (P2): list from `/api/vacuum/rooms`, tap = `room_sweep`.

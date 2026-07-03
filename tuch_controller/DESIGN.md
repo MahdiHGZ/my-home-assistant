@@ -66,9 +66,9 @@ all ambient info (`drawIsland` / `islandTick`):
   centre text (errors in red) without touching the shell or dots, then it
   reverts to the clock/title after `TOAST_HOLD_MS`.
 
-This replaced v1's separate header (COUKAB title + IP line) and the wifi-arc
-connection icon. The IP is still available under SETUP → DIAG. Geometry knobs:
-the `ISL_*` defines.
+The island owns the whole top edge — there is no separate header bar or
+standalone connection icon. The device IP is available under SETUP → INFO.
+Geometry knobs: the `ISL_*` defines.
 
 ## Living background
 
@@ -97,12 +97,12 @@ the earlier full-width back bar sat flush against the first row and cross-
 triggered it. `HIT_SLOP` was also dialed back to **8 px**: with big targets and
 5 px gutters, a large slop bled one button's hit-zone into its neighbour.
 
-## DEVICE info (SETUP → DEVICE)
+## DEVICE info (SETUP → INFO)
 
 `showDeviceInfo()` is a full-screen label/value readout: device/OTA name,
 firmware build date, Wi-Fi SSID, IP, gateway, MAC, signal (dBm + quality),
 server `host:port`, stream status, uptime, free/total RAM, chip + cores, flash
-size, and display resolution. Tap anywhere to close. (Replaces v1's terse DIAG.)
+size, and display resolution. Tap anywhere to close.
 
 ## Wake: no white flash
 
@@ -122,13 +122,6 @@ calls the genuine `drawPage()` for each page and writes `tft`'s framebuffer to
 PNG. All geometry/text comes from the vendored genuine Adafruit_GFX, so the
 output matches the device. The screen list and layouts live in `pages.h`, shared
 verbatim with the firmware. See `tools/host_preview/README.md`.
-
-## What did **not** change
-
-- All page/button layouts, IDs, hit-testing, and actions.
-- Networking, optimistic UI, offline messaging, alerts, camera preview.
-- Touch calibration, NVS settings, theme toggle, sleep/backlight policy.
-- The server contract. v2 talks to the same `web_server.py` / `tuch_controller_utils.py`.
 
 ## Tuning the frost
 
