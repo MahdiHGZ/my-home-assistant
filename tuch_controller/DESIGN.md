@@ -1,10 +1,10 @@
-# tuch_controller_v2 — Liquid-Glass Design Notes
+# tuch_controller — Liquid-Glass Design Notes
 
-v2 is the **same firmware as v1** with one thing swapped: the visual layer.
-The backend — FreeRTOS HTTP worker, SSE sync, touch + calibration, sleep
-ladder, OTA, the whole `/api/panel/*` contract — is byte-for-byte v1. Only the
-rendering primitives and how buttons/cards are painted changed. For wiring,
-build steps, server API, and troubleshooting see v1's `../tuch_controller/HARDWARE.md`.
+The firmware pairs a proven backend — FreeRTOS HTTP worker, SSE sync, touch +
+calibration, sleep ladder, OTA, the whole `/api/panel/*` contract — with a
+"liquid glass" visual layer: it is only the rendering primitives and how
+buttons/cards are painted that make this look distinct. For wiring, build steps,
+server API, and troubleshooting see `HARDWARE.md`.
 
 ## The look
 
@@ -117,7 +117,7 @@ reboot itself (inherent to deep sleep).
 `python3 render_preview.py` renders every screen to `preview/*.png` **on the
 computer, from the actual firmware** — no flashing, no Python re-implementation
 of the UI. It builds `tools/host_preview/preview.cpp`, which `#include`s the real
-`tuch_controller_v2.ino` (and `pages.h`) compiled against desktop shims, then
+`tuch_controller.ino` (and `pages.h`) compiled against desktop shims, then
 calls the genuine `drawPage()` for each page and writes `tft`'s framebuffer to
 PNG. All geometry/text comes from the vendored genuine Adafruit_GFX, so the
 output matches the device. The screen list and layouts live in `pages.h`, shared

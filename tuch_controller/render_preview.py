@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Render every tuch_controller_v2 screen to a PNG — from the real firmware code.
+"""Render every tuch_controller screen to a PNG — from the real firmware code.
 
 This builds a tiny host program (tools/host_preview/preview.cpp) that #includes
 the actual sketch, compiled against desktop shims, and calls the genuine
 drawPage()/showDeviceInfo() for each page. The layout comes from pages.h and the
-drawing from tuch_controller_v2.ino — there is NO duplicated Python UI code here;
+drawing from tuch_controller.ino — there is NO duplicated Python UI code here;
 this script only compiles and runs the C++ renderer.
 
 Usage:
     python3 render_preview.py            # build + render to ./preview/
     python3 render_preview.py --run-only # skip rebuild, just re-render
 
-Output: tuch_controller_v2/preview/*.png
+Output: tuch_controller/preview/*.png
 Requires: a C++17 compiler (g++ or clang++). No Arduino toolchain needed.
 """
 import os

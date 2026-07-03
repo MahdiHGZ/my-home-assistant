@@ -63,9 +63,9 @@ Empirically validated on this panel — change with care:
   but are only the fallback: **SETUP → CALIBRATE** (or hold the COUKAB title
   ~3 s) runs a 4-point calibration and stores the result in NVS namespace
   `tcal`, which wins over the defaults on every boot.
-- Anti-ghosting: pressure must exceed `TOUCH_MIN_PRESSURE` (300) and the
+- Anti-ghosting: pressure must exceed `TOUCH_MIN_PRESSURE` (250) and the
   same button must be hit on two consecutive 25 ms polls.
-- Hit-slop: touches up to `HIT_SLOP` (10 px) outside a button still land.
+- Hit-slop: touches up to `HIT_SLOP` (8 px) outside a button still land.
 
 ## 4. Firmware build (Arduino IDE)
 
@@ -126,8 +126,8 @@ delegates to it. The panel tags its SSE request with `X-Coukab-Panel: 1` so
 the server learns its IP — `find_panel_ip()` resolves `coukab-panel.local`
 (mDNS) or falls back to that last-seen IP.
 
-Connection icon (top-right, every page): **green** wifi+stream OK ·
-**yellow** wifi OK, server unreachable · **red+slash** no wifi · **grey**
+Connection dot (Dynamic Island, left, every page): **green** wifi+stream OK ·
+**yellow** wifi OK, server unreachable · **red** no wifi · **grey**
 wifi disabled. Offline behavior: pages stay usable, banners/toasts say
 exactly what's wrong ("no wifi" / "server offline" / "device not
 responding"), and sync retries automatically (SSE every 5 s; first snapshot

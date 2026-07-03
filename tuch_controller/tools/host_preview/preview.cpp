@@ -1,5 +1,5 @@
 // ============================================================================
-// preview.cpp — desktop renderer for the tuch_controller_v2 UI.
+// preview.cpp — desktop renderer for the tuch_controller UI.
 //
 // It #includes the REAL firmware sketch (compiled against the host shims) and
 // calls the genuine drawPage()/showDeviceInfo() for each screen, then writes the
@@ -29,7 +29,7 @@ void loadConfig();
 void saveConfig();
 
 // Pull in the entire firmware (drawing code, state, globals, the `tft` object).
-#include "../../tuch_controller_v2.ino"
+#include "../../tuch_controller.ino"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "vendor/stb_image_write.h"

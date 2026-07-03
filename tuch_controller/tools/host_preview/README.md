@@ -1,6 +1,6 @@
 # Host preview renderer
 
-Renders every `tuch_controller_v2` screen to a PNG **on the desktop, from the
+Renders every `tuch_controller` screen to a PNG **on the desktop, from the
 real firmware code** — so you can see UI changes instantly without flashing.
 
 ## Run it
@@ -12,7 +12,7 @@ python3 render_preview.py          # build + render to ./preview/
 python3 render_preview.py --run-only   # re-render without rebuilding
 ```
 
-Output lands in `tuch_controller_v2/preview/` (one PNG per screen, 2×).
+Output lands in `tuch_controller/preview/` (one PNG per screen, 2×).
 Needs a C++17 compiler (`g++`/`clang++`); no Arduino toolchain required.
 
 ## How it works (no duplicated UI code)
@@ -21,7 +21,7 @@ Needs a C++17 compiler (`g++`/`clang++`); no Arduino toolchain required.
 render_preview.py
    └─ g++  preview.cpp  +  vendor/Adafruit_GFX/Adafruit_GFX.cpp
             │
-            ├─ #include "../../tuch_controller_v2.ino"   ← the REAL firmware
+            ├─ #include "../../tuch_controller.ino"      ← the REAL firmware
             │        └─ #include "pages.h"               ← the REAL layouts
             └─ shims/ replace the hardware (WiFi, ESP, SPI, touch, ...)
 ```

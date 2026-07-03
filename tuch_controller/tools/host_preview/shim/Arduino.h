@@ -1,6 +1,6 @@
 // ============================================================================
 // Host shim for <Arduino.h> — just enough of the Arduino/ESP32 runtime for the
-// tuch_controller_v2 firmware (and Adafruit_GFX) to COMPILE and run natively so
+// tuch_controller firmware (and Adafruit_GFX) to COMPILE and run natively so
 // we can render the real UI to PNG. Nothing here talks to hardware.
 // ============================================================================
 #pragma once

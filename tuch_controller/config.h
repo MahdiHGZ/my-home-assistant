@@ -1,5 +1,11 @@
 // config.h — hardware pins, palette, and tuning for tuch_controller.
 //
+// Identical hardware contract to v1. The dark COL_* palette below is the
+// base the v2 "liquid glass" renderer tints over (see the glass primitives
+// in tuch_controller.ino and DESIGN.md). COL_CARD/COL_CARD_HI/COL_EDGE
+// are retained for the theme plumbing but the frosted look is computed at
+// runtime by alpha-blending over COL_BG.
+//
 // Pin and touch-mapping values are the validated setup documented in
 // HARDWARE.md. Do not change TOUCH_MAP_MODE unless the physical
 // orientation changes; if edge accuracy drifts, use the on-device
@@ -38,14 +44,16 @@
 #define TS_MAXY 3800
 
 #define TOUCH_MAP_MODE 5
-#define TOUCH_MIN_PRESSURE 300   // anti-ghosting: ignore feather touches
-#define HIT_SLOP 10              // accept touches this many px outside a button
+#define TOUCH_MIN_PRESSURE 250   // anti-ghosting: ignore feather touches (lower = more sensitive)
+#define HIT_SLOP 8               // accept touches this many px outside a button
+                                 // (kept modest: big targets + 5 px gutters, so a
+                                 //  large slop would bleed one button into the next)
 
 // --------------------------------------------------
 // Timing
 // --------------------------------------------------
-const uint16_t HTTP_TIMEOUT_MS    = 6000;
-const uint16_t STATUS_TIMEOUT_MS  = 10000;
+const uint16_t HTTP_TIMEOUT_MS    = 3500;
+const uint16_t STATUS_TIMEOUT_MS  = 2500;
 // Default screen-off timeout; user-adjustable on the SETUP page (30/60/120 s,
 // stored in NVS). The backlight dims at half this value.
 const unsigned long OFF_AFTER_MS  = 60000;
@@ -67,7 +75,7 @@ const char* OTA_HOSTNAME = "coukab-panel";
 // --------------------------------------------------
 // Dark / dark-navy palette (RGB565)
 // --------------------------------------------------
-#define COL_BG       0x0863   // background        rgb(10,14,30)
+#define COL_BG       0x0022   // background        deep navy rgb(0,4,16)
 #define COL_CARD     0x10E7   // card / button     rgb(22,30,58)
 #define COL_CARD_HI  0x218B   // pressed card      rgb(36,48,92)
 #define COL_EDGE     0x29CC   // subtle border     rgb(40,58,100)

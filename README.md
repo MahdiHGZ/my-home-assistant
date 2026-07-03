@@ -205,11 +205,9 @@ The web page is then always available at `http://<device-ip>:8080`.
 
 ## Touch-controller wall panel (Optional)
 
-An ESP32-S3 wall-mounted touch panel can display real-time status and trigger actions on the LAN. Two firmware versions are available:
-*   **v1 (Classic):** Found in [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller), featuring robust layout control and setup diagnostics (see [tuch_controller/HARDWARE.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/HARDWARE.md)).
-*   **v2 (Liquid-Glass):** Found in [tuch_controller_v2/](file:///Users/divar/Coukab/coukab_lan/tuch_controller_v2), featuring Apple-style frosted translucency (Liquid-Glass design), a Dynamic Island notification bar, and an ambient background that responds to active bulb colors (see [tuch_controller_v2/DESIGN.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller_v2/DESIGN.md)).
+An ESP32-S3 wall-mounted touch panel can display real-time status and trigger actions on the LAN. The firmware in [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) features an Apple-style **Liquid-Glass** design — frosted translucency, a Dynamic Island notification bar, and an ambient background that responds to active bulb colors (see [tuch_controller/DESIGN.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/DESIGN.md) and [tuch_controller/HARDWARE.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/HARDWARE.md) for wiring and setup).
 
-Both versions sync with the backend server via Server-Sent Events (SSE) and request server-rendered RGB565 images for alert and camera preview rendering.
+It syncs with the backend server via Server-Sent Events (SSE) and requests server-rendered RGB565 images for alert and camera preview rendering.
 
 ---
 
@@ -277,8 +275,7 @@ venv/bin/python -m unittest discover -s tests -v
 | [brain.py](file:///Users/divar/Coukab/coukab_lan/brain.py), [brain_test.py](file:///Users/divar/Coukab/coukab_lan/brain_test.py) | Optional local LLM agent, tool calling pipeline, and mock tests |
 | [brain_model/](file:///Users/divar/Coukab/coukab_lan/brain_model) | Contains the Gemma 4 LLM weights and model choice design doc |
 | [tooling.py](file:///Users/divar/Coukab/coukab_lan/tooling.py) | Shared decorators (`@brain_tool`) for registering LLM function tools |
-| [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) | ESP32-S3 wall touch panel firmware (v1: classic design; see `HARDWARE.md`) |
-| [tuch_controller_v2/](file:///Users/divar/Coukab/coukab_lan/tuch_controller_v2) | ESP32-S3 wall touch panel firmware (v2: Liquid-Glass design; see `DESIGN.md`) |
+| [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) | ESP32-S3 wall touch panel firmware (Liquid-Glass design; see `DESIGN.md` / `HARDWARE.md`) |
 | [tuch_controller_utils.py](file:///Users/divar/Coukab/coukab_lan/tuch_controller_utils.py) | Server-side panel helpers: alerts, RGB565 rendering, status flattening, panel discovery |
 | [moments/](file:///Users/divar/Coukab/coukab_lan/moments) | Captured camera photos (moments) and thumbnails |
 | [SUGGESTIONS.md](file:///Users/divar/Coukab/coukab_lan/SUGGESTIONS.md) | Feature suggestions roadmap (Web, Server, Security, Reliability, etc.) |

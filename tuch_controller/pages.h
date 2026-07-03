@@ -1,8 +1,8 @@
-// pages.h — page model & layout data for tuch_controller_v2.
+// pages.h — page model & layout data for tuch_controller.
 //
 // This is the single source of truth for the screens: the page list, the button
 // ids, the Btn layout arrays, and the mode/purifier label tables. It is shared
-// by the firmware (tuch_controller_v2.ino) AND the host preview renderer
+// by the firmware (tuch_controller.ino) AND the host preview renderer
 // (tools/host_preview), so the desktop PNGs are generated from the exact same
 // layout the device uses — never a duplicated copy.
 //

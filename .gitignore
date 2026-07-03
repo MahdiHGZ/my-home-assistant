@@ -5,8 +5,6 @@
 token.txt
 **/secrets.h
 tuch_controller/secrets.h
-tuch_controller_v2/secrets.h
-tuch_controller_v3/secrets.h
 *credentials*
 *.pem
 
