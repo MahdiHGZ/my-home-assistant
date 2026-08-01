@@ -105,6 +105,25 @@ class StatusRefreshTests(unittest.TestCase):
         self.assertTrue(result["_meta"]["stale"])
 
 
+class ChatIsolationTests(unittest.TestCase):
+    def test_each_request_uses_only_default_system_prompt(self):
+        fake = mock.Mock()
+        fake.get_default_system_prompt.return_value = "system"
+        fake.run_prompt.side_effect = ["first answer", "second answer"]
+        with mock.patch.object(web_server, "_ensure_chat_ready", return_value=fake):
+            web_server._run_chat("private first request")
+            web_server._run_chat("unrelated second request")
+
+        self.assertEqual(
+            [call.kwargs["system_prompt"] for call in fake.run_prompt.call_args_list],
+            ["system", "system"],
+        )
+        self.assertNotIn(
+            "private first request",
+            str(fake.run_prompt.call_args_list[1]),
+        )
+
+
 class EnumOptionTests(unittest.TestCase):
     def test_enum_options_shape(self):
         opts = web_server._enum_options(vacuum.SuctionLevel)

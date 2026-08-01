@@ -175,46 +175,27 @@ def _ensure_chat_ready():
     return brain
 
 
-from collections import deque
-_chat_history = deque(maxlen=6)
-
-def _build_history_prompt(brain_module) -> str:
-    base = brain_module.get_default_system_prompt()
-    if not _chat_history:
-        return base
-    history_text = "\n\nRecent conversation history:\n"
-    for msg in _chat_history:
-        history_text += f"{msg['role'].capitalize()}: {msg['content']}\n"
-    return base + history_text
-
 def _run_chat(message: str) -> str:
-    """Answer one command with sliding window memory."""
+    """Answer one isolated command without sharing data across clients."""
     with _chat_lock:
         brain = _ensure_chat_ready()
-        system_prompt = _build_history_prompt(brain)
-        reply = brain.run_prompt(message, system_prompt=system_prompt, use_tools=True)
-        _chat_history.append({"role": "user", "content": message})
-        _chat_history.append({"role": "assistant", "content": reply})
-        return reply
+        return brain.run_prompt(
+            message,
+            system_prompt=brain.get_default_system_prompt(),
+            use_tools=True,
+        )
 
 
 def _run_chat_stream(message: str):
-    """Yield assistant events (status/token/done) for one command with memory."""
+    """Yield events for one isolated command."""
     with _chat_lock:
         brain = _ensure_chat_ready()
-        system_prompt = _build_history_prompt(brain)
-        _chat_history.append({"role": "user", "content": message})
-        
-        reply_buffer = ""
-        for event in brain.run_prompt_stream(message, system_prompt=system_prompt, use_tools=True):
-            if event["type"] == "token":
-                reply_buffer += event["text"]
-            elif event["type"] == "done":
-                # done might contain the final text
-                reply_buffer = event["text"]
+        for event in brain.run_prompt_stream(
+            message,
+            system_prompt=brain.get_default_system_prompt(),
+            use_tools=True,
+        ):
             yield event
-            
-        _chat_history.append({"role": "assistant", "content": reply_buffer.strip()})
 
 
 # -- status helpers -----------------------------------------------------------
