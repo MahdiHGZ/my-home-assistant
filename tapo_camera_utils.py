@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,8 @@ _TAPO_PASSWORD = os.getenv("TAPO_PASSWORD", "")
 _TAPO_CLOUD_PASSWORD = os.getenv("TAPO_CLOUD_PASSWORD", "")
 
 MOMENTS_DIR = Path("moments")
+_moment_lock = threading.Lock()
+_MAX_MOMENTS = 50
 
 _PRIVACY_DISABLE_WAIT_S = 3
 
@@ -148,6 +152,39 @@ def connect(substream: bool = False) -> cv2.VideoCapture | None:
     return cap
 
 
+def _atomic_imwrite(path: Path, frame) -> None:
+    """Encode beside the destination and publish only a complete image."""
+    temp_path = path.parent / f".{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}"
+    try:
+        if not cv2.imwrite(str(temp_path), frame):
+            raise TapoError(f"Failed to encode image: {path}")
+        if not temp_path.is_file() or temp_path.stat().st_size == 0:
+            raise TapoError(f"Image encoder produced an empty file: {path}")
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _prune_moments() -> None:
+    files = sorted(
+        (
+            path for path in MOMENTS_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in files[_MAX_MOMENTS:]:
+        try:
+            path.unlink(missing_ok=True)
+            (MOMENTS_DIR / ".thumbs" / path.name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not prune old moment %s: %s", path.name, exc)
+
+
 def capture_moment(cap: cv2.VideoCapture) -> Path | None:
     """Captures a single frame and saves it as a timestamped JPEG.
 
@@ -155,25 +192,32 @@ def capture_moment(cap: cv2.VideoCapture) -> Path | None:
         Path to the saved file, or None on failure.
     """
     _require_dependencies()
-    MOMENTS_DIR.mkdir(exist_ok=True)
-    (MOMENTS_DIR / ".thumbs").mkdir(exist_ok=True)
     ret, frame = cap.read()
     if not ret:
         logger.error("Failed to read frame from camera.")
         return None
-    filename = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + ".jpg"
-    filepath = MOMENTS_DIR / filename
-    cv2.imwrite(str(filepath), frame)
-    
-    # Save a 256px thumbnail
-    thumb_path = MOMENTS_DIR / ".thumbs" / filename
-    h, w = frame.shape[:2]
-    scale = 256.0 / float(w)
-    if scale < 1.0:
-        thumb_frame = cv2.resize(frame, (256, int(h * scale)))
-    else:
-        thumb_frame = frame
-    cv2.imwrite(str(thumb_path), thumb_frame)
+    with _moment_lock:
+        MOMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (MOMENTS_DIR / ".thumbs").mkdir(exist_ok=True)
+        filename = (
+            datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+            + f"-{uuid.uuid4().hex[:8]}.jpg"
+        )
+        filepath = MOMENTS_DIR / filename
+        _atomic_imwrite(filepath, frame)
+
+        # Thumbnail failure must not hide a successfully committed original.
+        try:
+            thumb_path = MOMENTS_DIR / ".thumbs" / filename
+            h, w = frame.shape[:2]
+            scale = 256.0 / float(w)
+            thumb_frame = (
+                cv2.resize(frame, (256, int(h * scale))) if scale < 1.0 else frame
+            )
+            _atomic_imwrite(thumb_path, thumb_frame)
+        except Exception as exc:
+            logger.warning("Thumbnail creation failed for %s: %s", filename, exc)
+        _prune_moments()
 
     logger.info("Moment saved: %s", filepath)
     return filepath

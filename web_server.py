@@ -329,18 +329,6 @@ def _moment_files() -> list[Path]:
     ]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     
-    # Retention policy: Keep max 50 images
-    if len(files) > 50:
-        for p in files[50:]:
-            try:
-                p.unlink()
-                thumb_path = moments_dir / ".thumbs" / p.name
-                if thumb_path.exists():
-                    thumb_path.unlink()
-            except OSError as e:
-                logger.warning("Failed to prune old moment %s: %s", p.name, e)
-        files = files[:50]
-        
     return files
 
 
@@ -744,16 +732,17 @@ def _camera_capture(controller, body: dict) -> dict:
     flash = bool(body.get("flash"))
     try:
         if flash:
-            controller.run_action(controller._do_capture, flash=True, timeout=90)
+            captured = controller.run_action(controller._do_capture, flash=True, timeout=90)
         else:
-            tapo.capture_moment_for_model(include_data_uri=False)
+            result = tapo.capture_moment_for_model(include_data_uri=False)
+            captured = result["image_path"]
     except Exception as e:
         raise _ApiError(f"Capture failed: {e}", status=502) from e
-    files = _moment_files()
-    if not files:
+    image_path = Path(captured)
+    if not image_path.is_file():
         raise _ApiError("Capture produced no image.", status=502)
     notify_status_changed()
-    return {"ok": True, "image": f"/moments/{files[0].name}"}
+    return {"ok": True, "image": f"/moments/{image_path.name}"}
 
 
 def _camera_delete(body: dict) -> dict:

@@ -4,7 +4,10 @@ Feeds synthetic frames to analyze_frame() so the lighting classification,
 presence fields, and change detection are exercised without a Tapo camera.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -54,6 +57,41 @@ class AnalyzeFrameTests(unittest.TestCase):
 class ToolRegistrationTests(unittest.TestCase):
     def test_look_around_is_a_brain_tool(self):
         self.assertTrue(getattr(tapo.look_around, "__brain_tool__", False))
+
+
+class CaptureDurabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.original_dir = tapo.MOMENTS_DIR
+        tapo.MOMENTS_DIR = Path(self.tempdir.name)
+
+    def tearDown(self):
+        tapo.MOMENTS_DIR = self.original_dir
+        self.tempdir.cleanup()
+
+    @staticmethod
+    def _write_image(path, _frame):
+        Path(path).write_bytes(b"jpeg")
+        return True
+
+    def test_back_to_back_captures_have_unique_committed_paths(self):
+        cap = mock.Mock()
+        cap.read.return_value = (True, np.zeros((10, 10, 3), dtype=np.uint8))
+        with mock.patch.object(tapo.cv2, "imwrite", side_effect=self._write_image):
+            first = tapo.capture_moment(cap)
+            second = tapo.capture_moment(cap)
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.is_file())
+        self.assertTrue(second.is_file())
+
+    def test_failed_encode_never_publishes_destination(self):
+        destination = tapo.MOMENTS_DIR / "broken.jpg"
+        destination.parent.mkdir()
+        with mock.patch.object(tapo.cv2, "imwrite", return_value=False):
+            with self.assertRaises(tapo.TapoError):
+                tapo._atomic_imwrite(destination, np.zeros((1, 1, 3), dtype=np.uint8))
+        self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":

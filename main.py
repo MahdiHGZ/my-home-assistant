@@ -118,7 +118,7 @@ _COMBO_KEY_MODES: dict[str, yeelight_bulb_utils.BulbMode] = {
 # Camera capture helpers
 # ---------------------------------------------------------------------------
 
-def _capture(bulbs: dict[str, str], *, flash: bool) -> None:
+def _capture(bulbs: dict[str, str], *, flash: bool) -> Path:
     """Captures a photo, optionally flashing full brightness first.
 
     The camera is connected before any lighting changes, so a slow or
@@ -126,15 +126,17 @@ def _capture(bulbs: dict[str, str], *, flash: bool) -> None:
     """
     cap = tapo_camera_utils.connect()
     if cap is None:
-        logger.error("Camera connection failed.")
-        return
+        raise tapo_camera_utils.TapoError("Camera connection failed.")
 
     snapshot = None
     try:
         if flash:
             snapshot = yeelight_bulb_utils.read_state(bulbs)
             _prepare_flash_lighting(bulbs)
-        tapo_camera_utils.capture_moment(cap)
+        image_path = tapo_camera_utils.capture_moment(cap)
+        if image_path is None:
+            raise tapo_camera_utils.TapoError("Failed to capture image frame.")
+        return image_path
     finally:
         cap.release()
         if snapshot is not None:
@@ -490,12 +492,12 @@ class Controller:
             raise yeelight_bulb_utils.BulbBatchError(failures, result=result)
         return result
 
-    def _do_capture(self, *, flash: bool) -> None:
+    def _do_capture(self, *, flash: bool) -> Path:
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
         if yeelight_bulb_utils.is_party_running():
             yeelight_bulb_utils.stop_party_dance()
         logger.info("Capture (flash=%s).", flash)
-        _capture(bulbs, flash=flash)
+        return _capture(bulbs, flash=flash)
 
     def _do_countdown_capture(self) -> None:
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
