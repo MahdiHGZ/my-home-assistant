@@ -6,10 +6,12 @@ of running them, and only the no-device error branches of the vacuum/purifier
 handlers are tested.
 """
 
+import io
 import tempfile
 import threading
 import time
 import unittest
+from email.message import Message
 from pathlib import Path
 from unittest import mock
 
@@ -122,6 +124,41 @@ class ChatIsolationTests(unittest.TestCase):
             "private first request",
             str(fake.run_prompt.call_args_list[1]),
         )
+
+
+class RequestBodyLimitTests(unittest.TestCase):
+    @staticmethod
+    def _handler(length: str | None, body: bytes = b"{}", content_type="application/json"):
+        handler = object.__new__(web_server._Handler)
+        headers = Message()
+        if length is not None:
+            headers["Content-Length"] = length
+        if content_type is not None:
+            headers["Content-Type"] = content_type
+        handler.headers = headers
+        handler.rfile = io.BytesIO(body)
+        return handler
+
+    def test_oversized_length_is_rejected_before_read(self):
+        handler = self._handler(str(web_server._MAX_JSON_BODY_BYTES + 1), b"")
+        with self.assertRaises(web_server._ApiError) as raised:
+            handler._read_body()
+        self.assertEqual(raised.exception.status, 413)
+
+    def test_negative_length_is_rejected(self):
+        with self.assertRaises(web_server._ApiError) as raised:
+            self._handler("-1")._read_body()
+        self.assertEqual(raised.exception.status, 400)
+
+    def test_missing_length_is_rejected(self):
+        with self.assertRaises(web_server._ApiError) as raised:
+            self._handler(None)._read_body()
+        self.assertEqual(raised.exception.status, 411)
+
+    def test_json_content_type_is_required(self):
+        with self.assertRaises(web_server._ApiError) as raised:
+            self._handler("2", content_type="text/plain")._read_body()
+        self.assertEqual(raised.exception.status, 415)
 
 
 class EnumOptionTests(unittest.TestCase):

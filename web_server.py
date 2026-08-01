@@ -22,6 +22,7 @@ import queue
 import socket
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
@@ -57,6 +58,9 @@ _SCENE_MODE_KEYS = ["cool_white", "warm_white", "sunset", "sleep", "romantic", "
 # parallel with a bound on total threads.
 _STATUS_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="web-status")
 _STATUS_TIMEOUT_S = 12
+_MAX_JSON_BODY_BYTES = 16 * 1024
+_CONNECTION_TIMEOUT_S = 15
+_MAX_HANDLER_THREADS = 32
 
 # Vacuum commands share one MIoT transport. Serialize them so request threads
 # cannot interleave command/response traffic. Remote-drive requests additionally
@@ -756,6 +760,10 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "Coukab/1.0"
     protocol_version = "HTTP/1.1"
 
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(_CONNECTION_TIMEOUT_S)
+
     @property
     def _controller(self):
         return self.server.controller  # type: ignore[attr-defined]
@@ -781,10 +789,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise _ApiError("Content-Length is required.", status=411)
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise _ApiError("Invalid Content-Length.", status=400) from exc
+        if length < 0:
+            raise _ApiError("Invalid Content-Length.", status=400)
+        if length > _MAX_JSON_BODY_BYTES:
+            raise _ApiError("Request body is too large.", status=413)
         if not length:
             return {}
-        raw = self.rfile.read(length)
+        content_type = self.headers.get_content_type()
+        if content_type != "application/json":
+            raise _ApiError("Content-Type must be application/json.", status=415)
+        try:
+            raw = self.rfile.read(length)
+        except socket.timeout as exc:
+            raise _ApiError("Request body timed out.", status=408) from exc
+        if len(raw) != length:
+            raise _ApiError("Incomplete request body.", status=400)
         if not raw:
             return {}
         try:
@@ -915,7 +941,15 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             path = _resolve_moment(filename, thumb=thumb)
         except _ApiError as e:
-            self._send_json({"ok": False, "error": str(e)}, status=e.status)
+            if e.status >= 500:
+                error_id = uuid.uuid4().hex[:12]
+                logger.error("GET %s upstream failure [error_id=%s]: %s", path, error_id, e)
+                self._send_json(
+                    {"ok": False, "error": "Upstream service failed.", "error_id": error_id},
+                    status=e.status,
+                )
+            else:
+                self._send_json({"ok": False, "error": str(e)}, status=e.status)
             return
         content_type = _STATIC_TYPES.get(path.suffix.lower(), "application/octet-stream")
         data = path.read_bytes()
@@ -981,10 +1015,22 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "Not found."}, status=404)
         except _ApiError as e:
-            self._send_json({"ok": False, "error": str(e)}, status=e.status)
+            if e.status >= 500:
+                error_id = uuid.uuid4().hex[:12]
+                logger.error("POST %s upstream failure [error_id=%s]: %s", path, error_id, e)
+                self._send_json(
+                    {"ok": False, "error": "Upstream service failed.", "error_id": error_id},
+                    status=e.status,
+                )
+            else:
+                self._send_json({"ok": False, "error": str(e)}, status=e.status)
         except Exception as e:  # noqa: BLE001
-            logger.exception("GET %s failed", path)
-            self._send_json({"ok": False, "error": str(e)}, status=500)
+            error_id = uuid.uuid4().hex[:12]
+            logger.exception("GET %s failed [error_id=%s]", path, error_id)
+            self._send_json(
+                {"ok": False, "error": "Internal server error.", "error_id": error_id},
+                status=500,
+            )
 
     def do_POST(self) -> None:  # noqa: N802 - base API
         path = self.path.split("?", 1)[0]
@@ -1013,7 +1059,8 @@ class _Handler(BaseHTTPRequestHandler):
         except _ApiError as e:
             self._send_json({"ok": False, "error": str(e)}, status=e.status)
         except Exception as e:  # noqa: BLE001
-            logger.exception("POST %s failed", path)
+            error_id = uuid.uuid4().hex[:12]
+            logger.exception("POST %s failed [error_id=%s]", path, error_id)
             if e.__class__.__name__ in {"QueueFullError", "ActionQueueFullError"}:
                 self._send_json({"ok": False, "error": "Too many requests. Please try again."}, status=429)
             elif e.__class__.__name__ == "ActionInProgressError":
@@ -1027,14 +1074,55 @@ class _Handler(BaseHTTPRequestHandler):
                     status=202,
                 )
             elif isinstance(e, TimeoutError):
-                self._send_json({"ok": False, "error": str(e)}, status=504)
+                self._send_json(
+                    {"ok": False, "error": "Action timed out.", "error_id": error_id},
+                    status=504,
+                )
             elif isinstance(e, yeelight.BulbBatchError):
-                payload = {"ok": False, "error": str(e)}
-                if e.result is not None:
-                    payload["result"] = e.result
+                payload = {
+                    "ok": False,
+                    "error": "One or more bulbs failed.",
+                    "error_id": error_id,
+                    "failed_bulbs": sorted(e.failures),
+                }
                 self._send_json(payload, status=502)
             else:
-                self._send_json({"ok": False, "error": str(e)}, status=500)
+                self._send_json(
+                    {"ok": False, "error": "Internal server error.", "error_id": error_id},
+                    status=500,
+                )
+
+
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Thread-per-request server with explicit admission control."""
+
+    request_queue_size = _MAX_HANDLER_THREADS
+
+    def __init__(self, *args, **kwargs):
+        self._handler_slots = threading.BoundedSemaphore(_MAX_HANDLER_THREADS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._handler_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._handler_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._handler_slots.release()
 
 
 def lan_ip() -> str:
@@ -1053,7 +1141,7 @@ def lan_ip() -> str:
 def start(controller, host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServer:
     """Bind and start the web server in a background thread; returns the server."""
     global _controller_ref
-    httpd = ThreadingHTTPServer((host, port), _Handler)
+    httpd = _BoundedThreadingHTTPServer((host, port), _Handler)
     httpd.controller = controller  # type: ignore[attr-defined]
     httpd.daemon_threads = True
 
