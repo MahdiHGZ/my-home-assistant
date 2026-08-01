@@ -25,7 +25,7 @@ import time
 from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -103,13 +103,14 @@ _controller_ref = None  # set by start()
 
 _STATUS_CACHE_TTL_S = 3.0
 _last_status_time = 0.0
+_status_invalidated = True
 
 
 def notify_status_changed() -> None:
     """Schedules a status push to all connected SSE clients and invalidates cache."""
-    global _last_status_time
+    global _status_invalidated
     with _last_status_lock:
-        _last_status_time = 0.0
+        _status_invalidated = True
     _status_dirty.set()
 
 
@@ -134,7 +135,7 @@ def _notifier_loop() -> None:
         if not has_clients or _controller_ref is None:
             continue
         try:
-            payload = json.dumps(_build_status(_controller_ref))
+            payload = json.dumps(_cached_status(_controller_ref))
         except Exception:
             logger.exception("Status build for SSE push failed.")
             continue
@@ -387,38 +388,81 @@ def _delete_moment(name: str) -> None:
 # /api/status requests and SSE pushes alike).
 _last_status_lock = threading.Lock()
 _last_status: dict | None = None
+_status_refresh_lock = threading.Lock()
+_status_futures_lock = threading.Lock()
+_status_futures: dict[str, Future] = {}
+
+
+def _status_snapshot(snapshot: dict, generated_at: float) -> dict:
+    """Return a copy annotated with cache age without mutating the cache."""
+    age = max(0.0, time.monotonic() - generated_at)
+    result = dict(snapshot)
+    result["_meta"] = {
+        "age_ms": round(age * 1000),
+        "stale": age >= _STATUS_CACHE_TTL_S,
+    }
+    return result
+
+
+def _device_status_futures() -> dict[str, Future]:
+    readers = {
+        "lights": _lights_status,
+        "vacuum": _vacuum_status,
+        "purifier": _purifier_status,
+    }
+    with _status_futures_lock:
+        for key, reader in readers.items():
+            future = _status_futures.get(key)
+            if future is None or future.done():
+                _status_futures[key] = _STATUS_POOL.submit(_safe, reader)
+        return dict(_status_futures)
 
 
 def _build_status(controller) -> dict:
-    global _last_status, _last_status_time
-    futures = {
-        "lights": _STATUS_POOL.submit(_safe, _lights_status),
-        "vacuum": _STATUS_POOL.submit(_safe, _vacuum_status),
-        "purifier": _STATUS_POOL.submit(_safe, _purifier_status),
-    }
-    result: dict = {}
-    for key, future in futures.items():
-        try:
-            result[key] = future.result(timeout=_STATUS_TIMEOUT_S)
-        except FutureTimeout:
-            result[key] = {"available": False, "error": "device did not respond in time"}
-        except Exception as e:  # noqa: BLE001
-            result[key] = {"available": False, "error": str(e)}
-    result["lights"]["state"] = controller.state()
-    result["moments"] = _moments_summary()
-    with _last_status_lock:
-        _last_status = result
-        _last_status_time = time.time()
-    return result
+    global _last_status, _last_status_time, _status_invalidated
+    requested_at = time.monotonic()
+    with _status_refresh_lock:
+        # A concurrent builder may already have produced the snapshot this
+        # caller needed; reuse it instead of immediately polling again.
+        with _last_status_lock:
+            if _last_status is not None and _last_status_time >= requested_at:
+                return _status_snapshot(_last_status, _last_status_time)
+
+        futures = _device_status_futures()
+        done, _ = wait(set(futures.values()), timeout=_STATUS_TIMEOUT_S)
+        result: dict = {}
+        for key, future in futures.items():
+            if future not in done:
+                result[key] = {
+                    "available": False,
+                    "error": "device did not respond in time",
+                }
+                continue
+            try:
+                result[key] = future.result()
+            except Exception as e:  # noqa: BLE001
+                result[key] = {"available": False, "error": str(e)}
+        result["lights"]["state"] = controller.state()
+        result["moments"] = _moments_summary()
+        generated_at = time.monotonic()
+        with _last_status_lock:
+            _last_status = result
+            _last_status_time = generated_at
+            _status_invalidated = False
+        return _status_snapshot(result, generated_at)
 
 
 def _cached_status(controller) -> dict:
     """Returns the cached status if it's less than TTL seconds old, else builds fresh."""
     global _last_status, _last_status_time
-    now = time.time()
+    now = time.monotonic()
     with _last_status_lock:
-        if _last_status is not None and (now - _last_status_time) < _STATUS_CACHE_TTL_S:
-            return _last_status
+        if (
+            _last_status is not None
+            and not _status_invalidated
+            and (now - _last_status_time) < _STATUS_CACHE_TTL_S
+        ):
+            return _status_snapshot(_last_status, _last_status_time)
     return _build_status(controller)
 
 
@@ -430,12 +474,12 @@ def _panel_cached_status(controller) -> dict:
     reads; the SSE notifier refreshes the cache in the background.
     """
     global _last_status, _last_status_time
-    now = time.time()
+    now = time.monotonic()
     with _last_status_lock:
         if _last_status is not None:
             if (now - _last_status_time) >= _STATUS_CACHE_TTL_S:
                 _status_dirty.set()
-            return _last_status
+            return _status_snapshot(_last_status, _last_status_time)
     return _build_status(controller)
 
 
@@ -880,7 +924,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
             # Initial snapshot so a freshly opened page renders at once.
-            payload = json.dumps(_build_status(self._controller))
+            payload = json.dumps(_cached_status(self._controller))
             self.wfile.write(f"event: status\ndata: {payload}\n\n".encode("utf-8"))
             self.wfile.flush()
 

@@ -7,6 +7,8 @@ handlers are tested.
 """
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -56,6 +58,51 @@ class SafeTests(unittest.TestCase):
 
     def test_safe_wraps_scalar(self):
         self.assertEqual(web_server._safe(lambda: 5), {"value": 5, "available": True})
+
+
+class StatusRefreshTests(unittest.TestCase):
+    def setUp(self):
+        with web_server._last_status_lock:
+            web_server._last_status = None
+            web_server._last_status_time = 0.0
+            web_server._status_invalidated = True
+        with web_server._status_futures_lock:
+            web_server._status_futures.clear()
+
+    def test_concurrent_cache_misses_share_one_refresh(self):
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def reader():
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.03)
+            return {}
+
+        controller = RecordingController()
+        with (
+            mock.patch.object(web_server, "_lights_status", side_effect=reader),
+            mock.patch.object(web_server, "_vacuum_status", side_effect=reader),
+            mock.patch.object(web_server, "_purifier_status", side_effect=reader),
+        ):
+            threads = [
+                threading.Thread(target=web_server._cached_status, args=(controller,))
+                for _ in range(5)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(calls, 3)
+
+    def test_panel_snapshot_exposes_staleness(self):
+        with web_server._last_status_lock:
+            web_server._last_status = {"lights": {}, "vacuum": {}, "purifier": {}}
+            web_server._last_status_time = time.monotonic() - 10
+        result = web_server._panel_cached_status(RecordingController())
+        self.assertTrue(result["_meta"]["stale"])
 
 
 class EnumOptionTests(unittest.TestCase):
