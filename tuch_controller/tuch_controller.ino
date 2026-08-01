@@ -319,6 +319,8 @@ bool nightEnabled = true;
 #define JOB_POST   0
 #define JOB_STATUS 1
 #define JOB_ALERT  2
+#define JOB_ALERT_IMAGE  3
+#define JOB_MOMENT_IMAGE 4
 
 struct ApiJob {
   uint8_t type;
@@ -332,6 +334,8 @@ struct ApiJob {
 #define RES_TOAST  0   // a POST finished: text = message, ok = success
 #define RES_STATUS 1   // text = /api/panel/status payload ("{}" on failure)
 #define RES_ALERT  2   // text = /api/panel/alert payload
+#define RES_ALERT_IMAGE  3
+#define RES_MOMENT_IMAGE 4
 struct ApiResult {
   uint8_t type;
   bool ok;
@@ -340,6 +344,13 @@ struct ApiResult {
 
 QueueHandle_t apiQueue = nullptr;
 QueueHandle_t resultQueue = nullptr;
+QueueHandle_t imageAckQueue = nullptr;
+
+// One worker-owned transfer buffer. The worker waits for a UI acknowledgement
+// after publishing an image result, so it can never overwrite pixels while
+// loop() is drawing them.
+static const size_t IMAGE_BUFFER_BYTES = 296U * 186U * 2U;
+uint8_t* imageBuffer = nullptr;
 
 // True while the worker is mid-request; read by the UI to show the in-flight
 // dot. Single writer (worker), single reader (loop) — volatile is enough. (§5.2)
@@ -2122,6 +2133,31 @@ String httpGetJson(const char* path, uint32_t timeoutMs) {
   return out;
 }
 
+bool httpGetBinary(const char* path, uint8_t* out, size_t expected, uint32_t timeoutMs) {
+  if (!out || (ENABLE_WIFI && WiFi.status() != WL_CONNECTED)) return false;
+  WiFiClient client;
+  HTTPClient http;
+  String url = String("http://") + API_HOST + ":" + String(API_PORT) + path;
+  if (!http.begin(client, url)) return false;
+  http.setTimeout(timeoutMs);
+  http.setConnectTimeout(serverReachable ? HTTP_TIMEOUT_MS : 2500);
+  if (http.GET() != 200) {
+    http.end();
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  size_t received = 0;
+  unsigned long deadline = millis() + timeoutMs;
+  while (received < expected && millis() < deadline) {
+    int count = stream->read(out + received, expected - received);
+    if (count > 0) received += (size_t)count;
+    else delay(2);
+  }
+  http.end();
+  return received == expected;
+}
+
 // Hand one finished result to loop() over the result queue. Blocks the worker
 // only if loop() is briefly behind (queue full) — bounded, and far cleaner
 // than the old volatile-slot spin-waits.
@@ -2158,10 +2194,18 @@ void apiWorkerTask(void* arg) {
       if (payload.length()) serverReachable = true;
       else if (WiFi.status() == WL_CONNECTED) serverReachable = false;
       pushResult(RES_STATUS, payload.length() > 0, payload.length() ? payload.c_str() : "{}");
-    } else {  // JOB_ALERT — fetch the alert metadata (id) for dedupe
+    } else if (job.type == JOB_ALERT) {  // fetch alert metadata (id) for dedupe
       String payload = httpGetJson("/api/panel/alert", HTTP_TIMEOUT_MS);
       if (payload.length()) serverReachable = true;
       pushResult(RES_ALERT, payload.length() > 0, payload.length() ? payload.c_str() : "{}");
+    } else {
+      bool alertImage = job.type == JOB_ALERT_IMAGE;
+      size_t expected = alertImage ? 296U * 160U * 2U : IMAGE_BUFFER_BYTES;
+      bool ok = httpGetBinary(job.path, imageBuffer, expected, 15000);
+      pushResult(alertImage ? RES_ALERT_IMAGE : RES_MOMENT_IMAGE, ok, "");
+      // Keep sole ownership of imageBuffer until loop() finishes drawing.
+      uint8_t ack;
+      if (imageAckQueue) xQueueReceive(imageAckQueue, &ack, portMAX_DELAY);
     }
 
     workerBusy = false;
@@ -2225,13 +2269,21 @@ void enqueueAlertFetch() {
   enqueueJob(job);
 }
 
+bool enqueueImageFetch(uint8_t type, const char* path) {
+  ApiJob job;
+  job.type = type;
+  job.timeoutMs = 15000;
+  strlcpy(job.path, path, sizeof(job.path));
+  job.body[0] = job.okMsg[0] = '\0';
+  dropQueuedStatusJobs();
+  return enqueueJob(job);
+}
+
 // --------------------------------------------------
 // Server-pushed alert popup. The popup body is rendered by the server
 // (alert.rgb565) and blitted row-by-row; only the CLOSE button is local.
 // --------------------------------------------------
-void showAlertOverlay() {
-  if (!ENABLE_WIFI || WiFi.status() != WL_CONNECTED) return;
-
+void renderAlertOverlay() {
   const int16_t W = 296, H = 160, X = 12, Y = 24;
 
   // Alerts must be seen: wake a dark screen and reset the idle timer.
@@ -2242,45 +2294,15 @@ void showAlertOverlay() {
   lastActivityMs = millis();
   previewActive = false;
 
-  WiFiClient client;
-  HTTPClient http;
-  String url = String("http://") + API_HOST + ":" + String(API_PORT) +
-               "/api/panel/alert.rgb565?w=" + W + "&h=" + H;
-  if (!http.begin(client, url)) return;
-  http.setTimeout(15000);
-  http.setConnectTimeout(HTTP_TIMEOUT_MS);
-
-  int code = http.GET();
-  if (code != 200) {
-    http.end();
-    return;  // nothing to show; stay on the current page
-  }
-
-  WiFiClient* s = http.getStreamPtr();
   static uint16_t line[296];
-  uint8_t raw[592];
-
   tft.fillScreen(COL_BG);
-
-  // One deadline for the whole image (not 8 s per row) so a stalled transfer
-  // can't freeze the UI for minutes. (§6.4)
-  unsigned long blitDeadline = millis() + 7000;
-  bool complete = true;
   for (int16_t row = 0; row < H; row++) {
-    int need = W * 2, got = 0;
-    while (got < need && millis() < blitDeadline) {
-      int r = s->read(raw + got, need - got);
-      if (r > 0) got += r;
-      else delay(2);
-    }
-    if (got < need) { complete = false; break; }
     for (int16_t px = 0; px < W; px++) {
-      line[px] = ((uint16_t)raw[2 * px] << 8) | raw[2 * px + 1];  // big-endian wire
+      size_t pos = ((size_t)row * W + px) * 2U;
+      line[px] = ((uint16_t)imageBuffer[pos] << 8) | imageBuffer[pos + 1];
     }
     tft.drawRGBBitmap(X, Y + row, line, W, 1);
   }
-  http.end();
-  (void)complete;
 
   // Local CLOSE button (tapping anywhere also dismisses). Rounded pill with
   // an X glyph + label, matching the server-rendered card's accent.
@@ -2301,68 +2323,50 @@ void showAlertOverlay() {
   dragId = -1;
 }
 
+void showAlertOverlay() {
+  if (!ENABLE_WIFI || WiFi.status() != WL_CONNECTED) return;
+  if (!screenOn) {
+    screenOn = true;
+    setBacklight(BL_FULL);
+  }
+  drawToast("loading alert...", COL_ACCENT);
+  if (!enqueueImageFetch(
+        JOB_ALERT_IMAGE, "/api/panel/alert.rgb565?w=296&h=160")) {
+    drawToastAlarm("alert queue busy");
+  }
+}
+
 // --------------------------------------------------
 // Button actions
 // --------------------------------------------------
-// Streams the server-rendered RGB565 thumbnail of the newest moment
-// straight to the TFT, row by row. Deliberately synchronous: it's an
-// explicit user action with visible progress (the image painting in).
+void renderMomentPreview() {
+  const int16_t W = 296, H = 186, X = 12, Y = 46;
+  static uint16_t line[296];
+  tft.fillScreen(COL_BG);
+  tft.drawRect(X - 2, Y - 2, W + 4, H + 4, COL_EDGE);
+  drawCenteredText("tap to close", 160, 18, 1, COL_DIM);
+  for (int16_t row = 0; row < H; row++) {
+    for (int16_t px = 0; px < W; px++) {
+      size_t pos = ((size_t)row * W + px) * 2U;
+      line[px] = ((uint16_t)imageBuffer[pos] << 8) | imageBuffer[pos + 1];
+    }
+    tft.drawRGBBitmap(X, Y + row, line, W, 1);
+  }
+  previewActive = true;
+  ignoreUntilRelease = true;
+  lastActivityMs = millis();
+}
+
 void showMomentPreview() {
   if (!ENABLE_WIFI || WiFi.status() != WL_CONNECTED) {
     drawToastAlarm("no network");
     return;
   }
-
-  const int16_t W = 296, H = 186, X = 12, Y = 46;
-
   drawToast("loading photo...", COL_ACCENT);
-
-  WiFiClient client;
-  HTTPClient http;
-  String url = String("http://") + API_HOST + ":" + String(API_PORT) +
-               "/api/panel/moment.rgb565?w=" + W + "&h=" + H;
-  if (!http.begin(client, url)) return;
-  http.setTimeout(15000);
-  http.setConnectTimeout(HTTP_TIMEOUT_MS);
-
-  int code = http.GET();
-  if (code != 200) {
-    http.end();
-    drawToastAlarm(code == 404 ? "no photos yet" : "photo load failed");
-    return;
+  if (!enqueueImageFetch(
+        JOB_MOMENT_IMAGE, "/api/panel/moment.rgb565?w=296&h=186")) {
+    drawToastAlarm("photo queue busy");
   }
-
-  WiFiClient* s = http.getStreamPtr();
-  static uint16_t line[296];
-  uint8_t raw[592];
-
-  tft.fillScreen(COL_BG);
-  tft.drawRect(X - 2, Y - 2, W + 4, H + 4, COL_EDGE);
-  drawCenteredText("tap to close", 160, 18, 1, COL_DIM);
-
-  // One deadline for the whole image (not 8 s per row). (§6.4)
-  unsigned long blitDeadline = millis() + 7000;
-  bool complete = true;
-  for (int16_t row = 0; row < H; row++) {
-    int need = W * 2, got = 0;
-    while (got < need && millis() < blitDeadline) {
-      int r = s->read(raw + got, need - got);
-      if (r > 0) got += r;
-      else delay(2);
-    }
-    if (got < need) { complete = false; break; }
-    for (int16_t px = 0; px < W; px++) {
-      line[px] = ((uint16_t)raw[2 * px] << 8) | raw[2 * px + 1];  // big-endian wire
-    }
-    tft.drawRGBBitmap(X, Y + row, line, W, 1);
-  }
-  http.end();
-
-  if (!complete) drawCenteredText("(incomplete)", 160, 236, 1, COL_ERR);
-
-  previewActive = true;
-  ignoreUntilRelease = true;
-  lastActivityMs = millis();
 }
 
 void sendBrightness() {
@@ -3134,8 +3138,15 @@ void setup() {
 
   // HTTP worker (core 0; loop/draw stays on core 1). Jobs in on apiQueue,
   // finished results back on resultQueue (explicit cross-core handoff).
+  #if defined(ESP32)
+  imageBuffer = (uint8_t*)ps_malloc(IMAGE_BUFFER_BYTES);
+  #else
+  imageBuffer = (uint8_t*)malloc(IMAGE_BUFFER_BYTES);
+  #endif
+  if (!imageBuffer) Serial.println("Image buffer allocation failed.");
   apiQueue = xQueueCreate(8, sizeof(ApiJob));        // deeper: NIGHT posts 3 (§4.1)
   resultQueue = xQueueCreate(8, sizeof(ApiResult));
+  imageAckQueue = xQueueCreate(1, sizeof(uint8_t));
   xTaskCreatePinnedToCore(apiWorkerTask, "apiWorker", 8192, nullptr, 1, nullptr, 0);
 
   // Keep the radio awake while the UI is active; modem sleep is enabled again
@@ -3212,7 +3223,7 @@ void loop() {
           else drawToastAlarm(WiFi.status() != WL_CONNECTED ? "no wifi" : "sync failed");
         }
       }
-    } else {  // RES_ALERT — show once per id (dedupes repeated SSE pings/refetches)
+    } else if (res.type == RES_ALERT) {  // show once per id (dedupes repeated fetches)
       String payload(res.text);
       int id = jsonInt(payload, "id", 0);
       if (id > 0 && id != lastAlertId) {
@@ -3221,6 +3232,13 @@ void loop() {
         bootForAlertPoll = false; // a real alert is up; resume normal operation
       }
       alertPollDone = true;       // the deep-sleep alert poll has its answer
+    } else {
+      if (res.ok && res.type == RES_ALERT_IMAGE) renderAlertOverlay();
+      else if (res.ok && res.type == RES_MOMENT_IMAGE) renderMomentPreview();
+      else if (screenOn) drawToastAlarm(
+        res.type == RES_ALERT_IMAGE ? "alert load failed" : "photo load failed");
+      uint8_t ack = 1;
+      if (imageAckQueue) xQueueSend(imageAckQueue, &ack, 0);
     }
   }
 
