@@ -275,6 +275,8 @@ bool statusFetchQueued = false;  // dedupe: one panel-status fetch at a time
 // firmware only adds the CLOSE button.
 bool alertActive = false;        // an alert popup covers the screen
 bool alertPokePending = false;   // SSE announced a new alert
+bool alertImagePending = false;  // metadata arrived but image is not queued/rendered yet
+unsigned long lastAlertRetryMs = 0;
 int lastAlertId = 0;             // dedupe: last popup shown
 bool diagActive = false;         // SETUP diagnostics overlay covers the screen (§7.6)
 
@@ -2261,12 +2263,13 @@ void enqueueStatusFetch() {
   statusFetchQueued = enqueueJob(job);
 }
 
-void enqueueAlertFetch() {
+bool enqueueAlertFetch() {
   ApiJob job;
   job.type = JOB_ALERT;
   job.timeoutMs = 0;
   job.path[0] = job.body[0] = job.okMsg[0] = '\0';
-  enqueueJob(job);
+  dropQueuedStatusJobs();
+  return apiQueue && xQueueSendToFront(apiQueue, &job, 0) == pdTRUE;
 }
 
 bool enqueueImageFetch(uint8_t type, const char* path) {
@@ -2276,6 +2279,9 @@ bool enqueueImageFetch(uint8_t type, const char* path) {
   strlcpy(job.path, path, sizeof(job.path));
   job.body[0] = job.okMsg[0] = '\0';
   dropQueuedStatusJobs();
+  if (type == JOB_ALERT_IMAGE) {
+    return apiQueue && xQueueSendToFront(apiQueue, &job, 0) == pdTRUE;
+  }
   return enqueueJob(job);
 }
 
@@ -2330,8 +2336,10 @@ void showAlertOverlay() {
     setBacklight(BL_FULL);
   }
   drawToast("loading alert...", COL_ACCENT);
-  if (!enqueueImageFetch(
-        JOB_ALERT_IMAGE, "/api/panel/alert.rgb565?w=296&h=160")) {
+  alertImagePending = !enqueueImageFetch(
+        JOB_ALERT_IMAGE, "/api/panel/alert.rgb565?w=296&h=160");
+  if (alertImagePending) {
+    lastAlertRetryMs = millis();
     drawToastAlarm("alert queue busy");
   }
 }
@@ -3183,8 +3191,7 @@ void loop() {
   // the screen-off branch then re-sleeps. Give up (and re-sleep) if Wi-Fi is slow.
   if (bootForAlertPoll && !alertPollDone) {
     if (netReady && !alertPollRequested) {
-      alertPollRequested = true;
-      enqueueAlertFetch();
+      alertPollRequested = enqueueAlertFetch();
     } else if (millis() - bootMs > ALERT_POLL_WIFI_MS) {
       Serial.println("Alert poll: Wi-Fi too slow, re-sleeping.");
       alertPollDone = true;   // screen-off branch will deep-sleep again
@@ -3233,10 +3240,16 @@ void loop() {
       }
       alertPollDone = true;       // the deep-sleep alert poll has its answer
     } else {
-      if (res.ok && res.type == RES_ALERT_IMAGE) renderAlertOverlay();
+      if (res.ok && res.type == RES_ALERT_IMAGE) {
+        alertImagePending = false;
+        renderAlertOverlay();
+      }
       else if (res.ok && res.type == RES_MOMENT_IMAGE) renderMomentPreview();
-      else if (screenOn) drawToastAlarm(
-        res.type == RES_ALERT_IMAGE ? "alert load failed" : "photo load failed");
+      else if (res.type == RES_ALERT_IMAGE) {
+        alertImagePending = true;
+        lastAlertRetryMs = millis();
+        if (screenOn) drawToastAlarm("alert load failed");
+      } else if (screenOn) drawToastAlarm("photo load failed");
       uint8_t ack = 1;
       if (imageAckQueue) xQueueSend(imageAckQueue, &ack, 0);
     }
@@ -3253,8 +3266,14 @@ void loop() {
     enqueueStatusFetch();  // silent refresh triggered by an SSE event
   }
   if (alertPokePending && netReady) {
-    alertPokePending = false;
-    enqueueAlertFetch();   // SSE announced a new alert; fetch its id
+    // Clear only after ownership transfers to the priority queue. If full,
+    // the flag survives and loop() retries instead of silently losing alert.
+    if (enqueueAlertFetch()) alertPokePending = false;
+  }
+  if (alertImagePending && netReady && millis() - lastAlertRetryMs >= 1000) {
+    lastAlertRetryMs = millis();
+    alertImagePending = !enqueueImageFetch(
+      JOB_ALERT_IMAGE, "/api/panel/alert.rgb565?w=296&h=160");
   }
 
   // Until the first snapshot lands, keep retrying quietly every 30 s —
@@ -3287,7 +3306,8 @@ void loop() {
     // Only sleep once any in-flight network work is done, so we never suspend
     // mid-request or miss an alert that's already being fetched.
     bool netIdle = !workerBusy && uxQueueMessagesWaiting(apiQueue) == 0 &&
-                   !alertPokePending && !statusPokePending && !needSync;
+                   !alertPokePending && !alertImagePending &&
+                   !statusPokePending && !needSync;
     if (netIdle) {
       if (millis() - screenOffSince >= DEEP_SLEEP_AFTER_MS) {
         enterDeepSleep();   // resets on wake; never returns

@@ -172,6 +172,7 @@ typedef unsigned UBaseType_t;
 inline QueueHandle_t xQueueCreate(UBaseType_t, UBaseType_t) { return (QueueHandle_t)1; }
 inline BaseType_t xQueueReceive(QueueHandle_t, void*, uint32_t) { return pdFALSE; }
 inline BaseType_t xQueueSend(QueueHandle_t, const void*, uint32_t) { return pdTRUE; }
+inline BaseType_t xQueueSendToFront(QueueHandle_t, const void*, uint32_t) { return pdTRUE; }
 inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t) { return 0; }
 inline BaseType_t xTaskCreatePinnedToCore(void (*)(void*), const char*, uint32_t,
                                           void*, UBaseType_t, TaskHandle_t*, BaseType_t) { return pdTRUE; }
