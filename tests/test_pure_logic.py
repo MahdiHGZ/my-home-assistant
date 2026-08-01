@@ -10,6 +10,7 @@ import enum
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -88,6 +89,38 @@ class ResolveBulbTargetsTests(unittest.TestCase):
 
     def test_empty_registry(self):
         self.assertEqual(ybu._resolve_bulb_targets({}, None), [])
+
+
+class BulbBatchFailureTests(unittest.TestCase):
+    def tearDown(self):
+        ybu._state_stack.clear()
+
+    def test_apply_mode_reports_named_partial_failure(self):
+        class BrokenBulb:
+            def turn_on(self):
+                raise OSError("offline")
+
+        with mock.patch.object(ybu, "_get_bulb", return_value=BrokenBulb()):
+            with self.assertRaises(ybu.BulbBatchError) as raised:
+                ybu.apply_mode({"Kitchen": "192.0.2.1"}, "red")
+
+        self.assertEqual(set(raised.exception.failures), {"Kitchen"})
+
+    def test_failed_restore_keeps_undo_entry(self):
+        saved = {
+            "Kitchen": {
+                "ip": "192.0.2.1", "power": "on", "bright": 50,
+                "color_mode": 1, "ct": 3000, "rgb": 0xFF0000,
+            }
+        }
+        ybu._state_stack.append(saved)
+
+        with mock.patch.object(ybu, "apply_state", side_effect=OSError("offline")):
+            with self.assertRaises(OSError):
+                ybu.restore_state({"Kitchen": "192.0.2.1"})
+
+        self.assertEqual(ybu.undo_depth(), 1)
+        self.assertIs(ybu._state_stack[-1], saved)
 
 
 class ParseToolCallsTests(unittest.TestCase):

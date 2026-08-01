@@ -1014,6 +1014,11 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             elif isinstance(e, TimeoutError):
                 self._send_json({"ok": False, "error": str(e)}, status=504)
+            elif isinstance(e, yeelight.BulbBatchError):
+                payload = {"ok": False, "error": str(e)}
+                if e.result is not None:
+                    payload["result"] = e.result
+                self._send_json(payload, status=502)
             else:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 

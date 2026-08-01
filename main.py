@@ -471,13 +471,24 @@ class Controller:
             power is not None or brightness is not None or color is not None
         ):
             yeelight_bulb_utils.stop_party_dance()
-        return yeelight_bulb_utils.control_bulbs(
+        result = yeelight_bulb_utils.control_bulbs(
             targets,
             power=power,
             brightness=brightness,
             color=color,
             registered=bulbs,
         )
+        if not result.get("ok"):
+            entries = result.get("bulbs", [])
+            failures = {
+                str(entry.get("name", "unknown")): RuntimeError(
+                    str(entry.get("error", "Unknown bulb error."))
+                )
+                for entry in entries
+                if isinstance(entry, dict) and not entry.get("ok")
+            }
+            raise yeelight_bulb_utils.BulbBatchError(failures, result=result)
+        return result
 
     def _do_capture(self, *, flash: bool) -> None:
         bulbs = yeelight_bulb_utils.load_registered_bulbs()

@@ -36,6 +36,16 @@ _bulb_cache: dict[str, Bulb] = {}
 _bulb_cache_lock = threading.Lock()
 
 
+class BulbBatchError(RuntimeError):
+    """One or more bulbs failed during a multi-bulb operation."""
+
+    def __init__(self, failures: dict[str, BaseException], *, result: dict | None = None):
+        self.failures = failures
+        self.result = result
+        names = ", ".join(sorted(failures))
+        super().__init__(f"Bulb operation failed for: {names}")
+
+
 def _get_bulb(ip: str) -> Bulb:
     with _bulb_cache_lock:
         bulb = _bulb_cache.get(ip)
@@ -103,10 +113,16 @@ MODES: dict[str, BulbMode] = {
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _wait_all(futures: list[Future]) -> None:
-    """Waits for all futures; per-bulb errors are handled inside the actions."""
-    for future in futures:
-        future.result()
+def _wait_all(futures: list[tuple[str, Future]]) -> None:
+    """Wait for every bulb and report all failures together."""
+    failures: dict[str, BaseException] = {}
+    for name, future in futures:
+        try:
+            future.result()
+        except BaseException as exc:  # preserve every per-bulb failure
+            failures[name] = exc
+    if failures:
+        raise BulbBatchError(failures)
 
 
 def _for_each_bulb(
@@ -117,7 +133,10 @@ def _for_each_bulb(
     if not registered:
         logger.warning("No bulbs are registered.")
         return
-    _wait_all([_EXECUTOR.submit(action, name, ip) for name, ip in registered.items()])
+    _wait_all([
+        (name, _EXECUTOR.submit(action, name, ip))
+        for name, ip in registered.items()
+    ])
 
 
 def _random_vivid_rgb() -> tuple[int, int, int]:
@@ -154,7 +173,7 @@ def _for_each_named_bulb(
         if not ip:
             logger.warning("Missing bulb %s in config.", name)
             continue
-        futures.append(_EXECUTOR.submit(action, name, ip))
+        futures.append((name, _EXECUTOR.submit(action, name, ip)))
     _wait_all(futures)
 
 
@@ -173,6 +192,7 @@ def _apply_mode_to_subset(
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_named_bulb(registered, names, _apply)
 
@@ -186,6 +206,7 @@ def _turn_off_subset(registered: dict[str, str], names: Iterable[str]) -> None:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_named_bulb(registered, names, _turn_off)
 
@@ -242,6 +263,7 @@ def read_state(registered: dict[str, str]) -> dict[str, dict]:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): failed to read state — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _read)
     return state
@@ -288,6 +310,7 @@ def apply_state(registered: dict[str, str], state: dict[str, dict]) -> None:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _restore)
 
@@ -308,7 +331,11 @@ def restore_state(registered: dict[str, str]) -> bool:
         return False
     state = _state_stack.pop()
     logger.info("Undo — restoring previous state (%d remaining).", len(_state_stack))
-    apply_state(registered, state)
+    try:
+        apply_state(registered, state)
+    except Exception:
+        _state_stack.append(state)
+        raise
     return True
 
 
@@ -687,6 +714,7 @@ def apply_mode(
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _apply)
 
@@ -711,6 +739,7 @@ def full_off(registered: dict[str, str]) -> None:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _turn_off)
 
@@ -1114,6 +1143,7 @@ def adjust_brightness(registered: dict[str, str], step: int) -> None:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _adjust)
 
@@ -1137,6 +1167,7 @@ def set_random_color(registered: dict[str, str]) -> None:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _set_color)
 
@@ -1160,6 +1191,7 @@ def set_random_color_each(registered: dict[str, str]) -> None:
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): FAILED — %s", name, ip, e)
+            raise
 
     _for_each_bulb(registered, _set_color)
 
