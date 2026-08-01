@@ -47,6 +47,9 @@ class MiotHelper:
         self.token_var = token_var
         self._device: Any = None
         self._lock = threading.Lock()
+        # python-miio transports are request/response streams and are not safe
+        # for overlapping calls on one cached connection.
+        self._io_lock = threading.RLock()
 
     # -- config / connection ------------------------------------------------
 
@@ -97,13 +100,15 @@ class MiotHelper:
     # -- property / action access -------------------------------------------
 
     def get_prop(self, device: Any, name: str) -> Any:
-        siid, piid = self.prop_map[name]
-        result = device.get_property_by(siid, piid)
-        return result[0].get("value") if isinstance(result, list) else result
+        with self._io_lock:
+            siid, piid = self.prop_map[name]
+            result = device.get_property_by(siid, piid)
+            return result[0].get("value") if isinstance(result, list) else result
 
     def set_prop(self, device: Any, name: str, value: Any) -> Any:
-        siid, piid = self.prop_map[name]
-        return device.set_property_by(siid, piid, value)
+        with self._io_lock:
+            siid, piid = self.prop_map[name]
+            return device.set_property_by(siid, piid, value)
 
     def call_action(
         self,
@@ -111,10 +116,11 @@ class MiotHelper:
         action_name: str,
         params: list[dict[str, Any]] | None = None,
     ) -> Any:
-        if action_name not in self.action_map:
-            raise self.error_cls(f"Unknown action: {action_name}")
-        siid, aiid = self.action_map[action_name]
-        return device.call_action_by(siid, aiid, params or [])
+        with self._io_lock:
+            if action_name not in self.action_map:
+                raise self.error_cls(f"Unknown action: {action_name}")
+            siid, aiid = self.action_map[action_name]
+            return device.call_action_by(siid, aiid, params or [])
 
     def get_props(self, device: Any, names: list[str]) -> dict[str, Any]:
         """Reads many properties in batched requests (~15 per round-trip).
@@ -122,31 +128,32 @@ class MiotHelper:
         Unreadable properties come back as None. Falls back to one-by-one
         reads if the batched request is not supported.
         """
-        params = [
-            {"did": name, **dict(zip(("siid", "piid"), self.prop_map[name]))}
-            for name in names
-        ]
-        result: dict[str, Any] = {}
-        try:
-            responses = device.get_properties(
-                params,
-                property_getter="get_properties",
-                max_properties=_MAX_PROPS_PER_REQUEST,
-            )
-            for item in responses:
-                if isinstance(item, dict) and item.get("did") in self.prop_map:
-                    ok = item.get("code", 0) == 0
-                    result[item["did"]] = item.get("value") if ok else None
-        except Exception as e:
-            logger.debug(
-                "Batched property read failed (%s); falling back to per-property reads.", e
-            )
+        with self._io_lock:
+            params = [
+                {"did": name, **dict(zip(("siid", "piid"), self.prop_map[name]))}
+                for name in names
+            ]
+            result: dict[str, Any] = {}
+            try:
+                responses = device.get_properties(
+                    params,
+                    property_getter="get_properties",
+                    max_properties=_MAX_PROPS_PER_REQUEST,
+                )
+                for item in responses:
+                    if isinstance(item, dict) and item.get("did") in self.prop_map:
+                        ok = item.get("code", 0) == 0
+                        result[item["did"]] = item.get("value") if ok else None
+            except Exception as e:
+                logger.debug(
+                    "Batched property read failed (%s); falling back to per-property reads.", e
+                )
+                for name in names:
+                    try:
+                        result[name] = self.get_prop(device, name)
+                    except Exception as e2:
+                        logger.debug("Could not read %s: %s", name, e2)
+                        result[name] = None
             for name in names:
-                try:
-                    result[name] = self.get_prop(device, name)
-                except Exception as e2:
-                    logger.debug("Could not read %s: %s", name, e2)
-                    result[name] = None
-        for name in names:
-            result.setdefault(name, None)
-        return result
+                result.setdefault(name, None)
+            return result

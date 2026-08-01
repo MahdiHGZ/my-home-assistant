@@ -11,6 +11,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -34,6 +35,7 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bulb")
 # on every command. Entries are dropped on error so the next call reconnects.
 _bulb_cache: dict[str, Bulb] = {}
 _bulb_cache_lock = threading.Lock()
+_bulb_operation_locks: dict[str, threading.RLock] = {}
 
 
 class BulbBatchError(RuntimeError):
@@ -63,6 +65,20 @@ def _invalidate_bulb(ip: str) -> None:
 def _invalidate_all_bulbs() -> None:
     with _bulb_cache_lock:
         _bulb_cache.clear()
+
+
+@contextmanager
+def _bulb_operation(ip: str):
+    """Serialize a complete logical operation on one Yeelight connection."""
+    with _bulb_cache_lock:
+        lock = _bulb_operation_locks.setdefault(ip, threading.RLock())
+    with lock:
+        yield
+
+
+def _run_bulb_action(action: Callable[[str, str], None], name: str, ip: str) -> None:
+    with _bulb_operation(ip):
+        action(name, ip)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +150,7 @@ def _for_each_bulb(
         logger.warning("No bulbs are registered.")
         return
     _wait_all([
-        (name, _EXECUTOR.submit(action, name, ip))
+        (name, _EXECUTOR.submit(_run_bulb_action, action, name, ip))
         for name, ip in registered.items()
     ])
 
@@ -173,7 +189,7 @@ def _for_each_named_bulb(
         if not ip:
             logger.warning("Missing bulb %s in config.", name)
             continue
-        futures.append((name, _EXECUTOR.submit(action, name, ip)))
+        futures.append((name, _EXECUTOR.submit(_run_bulb_action, action, name, ip)))
     _wait_all(futures)
 
 
@@ -536,10 +552,11 @@ def _exit_music_mode() -> None:
     reads (e.g. save_state) use a fresh, normal connection.
     """
     for ip in list(_music_ips):
-        try:
-            _get_bulb(ip).stop_music()
-        except Exception as e:
-            logger.debug("Could not stop music mode for %s: %s", ip, e)
+        with _bulb_operation(ip):
+            try:
+                _get_bulb(ip).stop_music()
+            except Exception as e:
+                logger.debug("Could not stop music mode for %s: %s", ip, e)
         _invalidate_bulb(ip)
         _music_ips.discard(ip)
 
@@ -874,7 +891,8 @@ def _resolve_bulb_targets(
 def _read_bulb_entry(name: str, ip: str) -> dict[str, object]:
     """Fetch live state for one bulb (list mode)."""
     try:
-        props = _get_bulb(ip).get_properties()
+        with _bulb_operation(ip):
+            props = _get_bulb(ip).get_properties()
         return {
             "ok": True,
             "name": name,
@@ -944,22 +962,23 @@ def _control_bulb_apply(
 ) -> dict[str, object]:
     """Apply direct controls to one bulb; return one ``bulbs[]`` entry."""
     try:
-        bulb = _get_bulb(ip)
-        actions = _apply_direct_controls_to_bulb(
-            bulb,
-            power=power,
-            brightness=brightness,
-            parsed_color=parsed_color,
-        )
-        # Persist only when a colour was chosen. The web colour picker / temp
-        # slider fire on `change` (one final value), so this stays a single
-        # command per pick; the brightness slider streams `input` events and is
-        # deliberately left unpersisted to stay within the LAN rate limit.
-        if parsed_color is not None:
-            _persist_default(bulb)
-        if actions:
-            logger.info("Bulb %s (%s): %s", name, ip, ", ".join(actions))
-        props = bulb.get_properties()
+        with _bulb_operation(ip):
+            bulb = _get_bulb(ip)
+            actions = _apply_direct_controls_to_bulb(
+                bulb,
+                power=power,
+                brightness=brightness,
+                parsed_color=parsed_color,
+            )
+            # Persist only when a colour was chosen. The web colour picker / temp
+            # slider fire on `change` (one final value), so this stays a single
+            # command per pick; the brightness slider streams `input` events and is
+            # deliberately left unpersisted to stay within the LAN rate limit.
+            if parsed_color is not None:
+                _persist_default(bulb)
+            if actions:
+                logger.info("Bulb %s (%s): %s", name, ip, ", ".join(actions))
+            props = bulb.get_properties()
         return {
             "ok": True,
             "name": name,
