@@ -58,6 +58,14 @@ _SCENE_MODE_KEYS = ["cool_white", "warm_white", "sunset", "sleep", "romantic", "
 _STATUS_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="web-status")
 _STATUS_TIMEOUT_S = 12
 
+# Vacuum commands share one MIoT transport. Serialize them so request threads
+# cannot interleave command/response traffic. Remote-drive requests additionally
+# carry a browser-session sequence: once STOP(N) is seen, any delayed direction
+# with a sequence <= N is discarded instead of restarting physical movement.
+_vacuum_action_lock = threading.Lock()
+_remote_latest_seq: dict[str, int] = {}
+_REMOTE_SESSION_LIMIT = 64
+
 _STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
@@ -600,32 +608,50 @@ def _vacuum_action(body: dict) -> dict:
     action = _require(body, "action")
     value = body.get("value")
     try:
-        if action == "sweep":
-            vacuum.start_sweep()
-        elif action == "mop":
-            vacuum.start_mop()
-        elif action == "sweep_mop":
-            vacuum.start_sweep_mop()
-        elif action == "stop":
-            vacuum.stop()
-        elif action == "pause":
-            vacuum.pause()
-        elif action == "dock":
-            vacuum.return_dock()
-        elif action == "find_me":
-            vacuum.find_me()
-        elif action == "suction":
-            vacuum.set_suction_level(int(value))
-        elif action == "water":
-            vacuum.set_water_level(int(value))
-        elif action == "volume":
-            vacuum.set_volume(int(value))
-        elif action == "room_sweep":
-            vacuum.start_room_sweep(str(_require(body, "value")))
-        elif action == "remote":
-            vacuum.remote_control(int(value))
-        else:
-            raise _ApiError(f"Unknown vacuum action '{action}'.")
+        with _vacuum_action_lock:
+            if action == "sweep":
+                vacuum.start_sweep()
+            elif action == "mop":
+                vacuum.start_mop()
+            elif action == "sweep_mop":
+                vacuum.start_sweep_mop()
+            elif action == "stop":
+                vacuum.stop()
+            elif action == "pause":
+                vacuum.pause()
+            elif action == "dock":
+                vacuum.return_dock()
+            elif action == "find_me":
+                vacuum.find_me()
+            elif action == "suction":
+                vacuum.set_suction_level(int(value))
+            elif action == "water":
+                vacuum.set_water_level(int(value))
+            elif action == "volume":
+                vacuum.set_volume(int(value))
+            elif action == "room_sweep":
+                vacuum.start_room_sweep(str(_require(body, "value")))
+            elif action == "remote":
+                direction = int(value)
+                session = body.get("session")
+                seq = body.get("seq")
+                if session is not None or seq is not None:
+                    if not isinstance(session, str) or not session.strip():
+                        raise _ApiError("Remote control requires a non-empty 'session'.")
+                    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
+                        raise _ApiError("Remote control requires a positive integer 'seq'.")
+                    session = session[:80]
+                    latest = _remote_latest_seq.get(session, 0)
+                    if seq <= latest:
+                        return {"ok": True, "ignored": True, "reason": "stale remote command"}
+                    if session not in _remote_latest_seq and len(_remote_latest_seq) >= _REMOTE_SESSION_LIMIT:
+                        _remote_latest_seq.pop(next(iter(_remote_latest_seq)))
+                    # Record intent before I/O. If STOP fails, older movement
+                    # still must not be allowed to run afterward.
+                    _remote_latest_seq[session] = seq
+                vacuum.remote_control(direction)
+            else:
+                raise _ApiError(f"Unknown vacuum action '{action}'.")
     except _ApiError:
         raise
     except Exception as e:

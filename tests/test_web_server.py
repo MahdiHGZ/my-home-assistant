@@ -9,6 +9,7 @@ handlers are tested.
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import tapo_camera_utils as tapo
 import tuch_controller_utils as panel
@@ -138,6 +139,43 @@ class DeviceActionErrorTests(unittest.TestCase):
     def test_unknown_purifier_action_raises(self):
         with self.assertRaises(web_server._ApiError):
             web_server._purifier_action({"action": "explode"})
+
+
+class VacuumRemoteOrderingTests(unittest.TestCase):
+    def setUp(self):
+        web_server._remote_latest_seq.clear()
+
+    @mock.patch.object(web_server, "notify_status_changed")
+    @mock.patch.object(vacuum, "remote_control")
+    def test_direction_older_than_stop_is_discarded(self, remote, _notify):
+        stop = web_server._vacuum_action({
+            "action": "remote", "value": 5, "session": "drag-1", "seq": 2,
+        })
+        stale = web_server._vacuum_action({
+            "action": "remote", "value": 1, "session": "drag-1", "seq": 1,
+        })
+
+        self.assertEqual(stop, {"ok": True})
+        self.assertTrue(stale["ignored"])
+        remote.assert_called_once_with(5)
+
+    @mock.patch.object(web_server, "notify_status_changed")
+    @mock.patch.object(vacuum, "remote_control")
+    def test_new_drag_session_can_move_after_prior_stop(self, remote, _notify):
+        web_server._vacuum_action({
+            "action": "remote", "value": 5, "session": "drag-1", "seq": 2,
+        })
+        web_server._vacuum_action({
+            "action": "remote", "value": 1, "session": "drag-2", "seq": 1,
+        })
+
+        self.assertEqual([c.args[0] for c in remote.call_args_list], [5, 1])
+
+    @mock.patch.object(vacuum, "remote_control")
+    def test_remote_sequence_metadata_must_be_complete(self, remote):
+        with self.assertRaises(web_server._ApiError):
+            web_server._vacuum_action({"action": "remote", "value": 1, "seq": 1})
+        remote.assert_not_called()
 
 
 class PartyPatternTests(unittest.TestCase):

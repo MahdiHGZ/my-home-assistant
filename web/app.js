@@ -860,18 +860,37 @@ function wireDpadHold(btn) {
   const dir = +btn.dataset.vacRemote;
   let held = false;
   let loopTimer = null;
+  let session = "";
+  let seq = 0;
+  let directionInFlight = false;
 
-  const send = (value) => api("POST", "/api/vacuum/action", { action: "remote", value }).catch(() => {});
+  const newSession = () => {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  };
+  const send = (value) => api("POST", "/api/vacuum/action", {
+    action: "remote", value, session, seq: ++seq,
+  }).catch(() => {});
 
   const loop = () => {
     if (!held) return;
-    send(dir);
+    // Direction repeats are best-effort and coalesced. STOP is never held
+    // behind this flag; it is sent immediately with a higher sequence below.
+    if (!directionInFlight) {
+      directionInFlight = true;
+      send(dir).finally(() => { directionInFlight = false; });
+    }
     loopTimer = setTimeout(loop, 400);
   };
 
   btn.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    if (held) return;
     if (navigator.vibrate) navigator.vibrate(10);
+    session = newSession();
+    seq = 0;
     held = true;
     btn.classList.add("driving");
     loop();
