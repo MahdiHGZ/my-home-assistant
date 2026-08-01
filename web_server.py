@@ -497,9 +497,13 @@ def _panel_moment_rgb565(name: str | None, w: int, h: int) -> bytes:
 
 def _panel_alert_send(body: dict) -> dict:
     """Stores an alert (panel module) and pushes an SSE event to all clients."""
-    text = _require(body, "text")
+    _reject_unknown(body, {"text", "level"})
+    text = _string_field(body, "text")
+    level = _string_field(body, "level", required=False)
+    if level is not None and level not in {"info", "alert"}:
+        raise _ApiError("'level' must be 'info' or 'alert'.")
     try:
-        return panel.send_alert(str(text), body.get("level"))
+        return panel.send_alert(text, level or "info")
     except ValueError as e:
         raise _ApiError(str(e)) from e
 
@@ -565,11 +569,57 @@ def _require(body: dict, key: str):
     return body[key]
 
 
+def _reject_unknown(body: dict, allowed: set[str]) -> None:
+    unknown = sorted(set(body) - allowed)
+    if unknown:
+        raise _ApiError(f"Unknown field(s): {', '.join(unknown)}.")
+
+
+def _string_field(body: dict, key: str, *, required: bool = True) -> str | None:
+    value = body.get(key)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise _ApiError(f"'{key}' must be a non-empty string.")
+    return value.strip()
+
+
+def _bool_field(body: dict, key: str, *, required: bool = True) -> bool | None:
+    value = body.get(key)
+    if value is None and not required:
+        return None
+    if not isinstance(value, bool):
+        raise _ApiError(f"'{key}' must be a JSON boolean.")
+    return value
+
+
+def _int_field(
+    body: dict,
+    key: str,
+    *,
+    required: bool = True,
+    minimum: int | None = None,
+    maximum: int | None = None,
+    allowed: set[int] | None = None,
+) -> int | None:
+    value = body.get(key)
+    if value is None and not required:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _ApiError(f"'{key}' must be an integer.")
+    if minimum is not None and value < minimum or maximum is not None and value > maximum:
+        raise _ApiError(f"'{key}' is outside the allowed range.")
+    if allowed is not None and value not in allowed:
+        raise _ApiError(f"'{key}' is not an allowed value.")
+    return value
+
+
 def _lights_action(controller, body: dict) -> dict:
-    action = _require(body, "action")
+    action = _string_field(body, "action")
     c = controller
     if action == "mode":
-        key = _require(body, "mode")
+        _reject_unknown(body, {"action", "mode"})
+        key = _string_field(body, "mode")
         if key not in yeelight.MODES:
             raise _ApiError(f"Unknown mode '{key}'.")
         c.run_action(c._do_apply_mode, yeelight.MODES[key])
@@ -578,7 +628,8 @@ def _lights_action(controller, body: dict) -> dict:
     elif action == "party_toggle":
         c.run_action(c._do_party_toggle)
     elif action == "party_pattern":
-        c.run_action(c._do_party_pattern, int(_require(body, "value")))
+        _reject_unknown(body, {"action", "value"})
+        c.run_action(c._do_party_pattern, _int_field(body, "value", minimum=0))
     elif action == "cycle_start":
         c.run_action(c._do_color_cycle_start)
     elif action == "cycle_next":
@@ -599,18 +650,26 @@ def _lights_action(controller, body: dict) -> dict:
         c.run_action(c._do_undo)
     else:
         raise _ApiError(f"Unknown light action '{action}'.")
+    if action not in {"mode", "party_pattern"}:
+        _reject_unknown(body, {"action"})
     return {"ok": True, "state": c.state()}
 
 
 def _lights_control(controller, body: dict) -> dict:
-    targets = body.get("targets") or "all"
-    power = body.get("power")
-    brightness = body.get("brightness")
-    color = body.get("color")
+    _reject_unknown(body, {"targets", "power", "brightness", "color"})
+    targets = body.get("targets", "all")
+    if not isinstance(targets, str) and not (
+        isinstance(targets, list)
+        and all(isinstance(target, str) and target.strip() for target in targets)
+    ):
+        raise _ApiError("'targets' must be a string or a list of non-empty strings.")
+    power = _bool_field(body, "power", required=False)
+    brightness = _int_field(
+        body, "brightness", required=False, minimum=1, maximum=100,
+    )
+    color = _string_field(body, "color", required=False)
     if power is None and brightness is None and color is None:
         raise _ApiError("Provide at least one of power, brightness, color.")
-    if brightness is not None:
-        brightness = max(1, min(100, int(brightness)))
     result = controller.run_action(
         controller._do_control,
         targets,
@@ -622,8 +681,14 @@ def _lights_control(controller, body: dict) -> dict:
 
 
 def _vacuum_action(body: dict) -> dict:
-    action = _require(body, "action")
-    value = body.get("value")
+    action = _string_field(body, "action")
+    no_value_actions = {"sweep", "mop", "sweep_mop", "stop", "pause", "dock", "find_me"}
+    if action in no_value_actions:
+        _reject_unknown(body, {"action"})
+    elif action == "remote":
+        _reject_unknown(body, {"action", "value", "session", "seq"})
+    else:
+        _reject_unknown(body, {"action", "value"})
     try:
         with _vacuum_action_lock:
             if action == "sweep":
@@ -641,15 +706,18 @@ def _vacuum_action(body: dict) -> dict:
             elif action == "find_me":
                 vacuum.find_me()
             elif action == "suction":
-                vacuum.set_suction_level(int(value))
+                vacuum.set_suction_level(_int_field(body, "value", allowed={0, 1, 2, 3}))
             elif action == "water":
-                vacuum.set_water_level(int(value))
+                vacuum.set_water_level(_int_field(body, "value", allowed={0, 1, 2}))
             elif action == "volume":
-                vacuum.set_volume(int(value))
+                vacuum.set_volume(_int_field(body, "value", minimum=0, maximum=10))
             elif action == "room_sweep":
-                vacuum.start_room_sweep(str(_require(body, "value")))
+                value = body.get("value")
+                if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).strip():
+                    raise _ApiError("'value' must be a room identifier.")
+                vacuum.start_room_sweep(str(value))
             elif action == "remote":
-                direction = int(value)
+                direction = _int_field(body, "value", allowed={1, 2, 3, 4, 5, 10})
                 session = body.get("session")
                 seq = body.get("seq")
                 if session is not None or seq is not None:
@@ -679,29 +747,33 @@ def _vacuum_action(body: dict) -> dict:
 
 
 def _purifier_action(body: dict) -> dict:
-    action = _require(body, "action")
-    value = body.get("value")
+    action = _string_field(body, "action")
+    if action == "toggle":
+        _reject_unknown(body, {"action"})
+    else:
+        _reject_unknown(body, {"action", "value"})
     try:
         if action == "power":
+            value = _bool_field(body, "value")
             purifier.turn_on() if value else purifier.turn_off()
         elif action == "toggle":
             purifier.toggle()
         elif action == "mode":
-            purifier.set_mode(int(value))
+            purifier.set_mode(_int_field(body, "value", allowed={0, 1, 2, 3}))
         elif action == "fan":
-            purifier.set_fan_level(int(value))
+            purifier.set_fan_level(_int_field(body, "value", allowed={1, 2, 3}))
         elif action == "manual_level":
-            purifier.set_manual_level(int(value))
+            purifier.set_manual_level(_int_field(body, "value", minimum=1, maximum=3))
         elif action == "favorite_speed":
-            purifier.set_favorite_speed(int(value))
+            purifier.set_favorite_speed(_int_field(body, "value", minimum=200, maximum=2300))
         elif action == "anion":
-            purifier.set_anion(bool(value))
+            purifier.set_anion(_bool_field(body, "value"))
         elif action == "child_lock":
-            purifier.set_child_lock(bool(value))
+            purifier.set_child_lock(_bool_field(body, "value"))
         elif action == "buzzer":
-            purifier.set_buzzer(bool(value))
+            purifier.set_buzzer(_bool_field(body, "value"))
         elif action == "screen":
-            purifier.set_screen_brightness(int(value))
+            purifier.set_screen_brightness(_int_field(body, "value", allowed={0, 1, 2}))
         else:
             raise _ApiError(f"Unknown purifier action '{action}'.")
     except _ApiError:
@@ -714,7 +786,10 @@ def _purifier_action(body: dict) -> dict:
 
 
 def _camera_capture(controller, body: dict) -> dict:
-    flash = bool(body.get("flash"))
+    _reject_unknown(body, {"flash"})
+    flash = _bool_field(body, "flash", required=False)
+    if flash is None:
+        flash = False
     try:
         if flash:
             captured = controller.run_action(controller._do_capture, flash=True, timeout=90)
@@ -732,11 +807,12 @@ def _camera_capture(controller, body: dict) -> dict:
 
 def _camera_delete(body: dict) -> dict:
     """Deletes a single captured image by its `/moments/<name>` URL or name."""
+    _reject_unknown(body, {"image", "password"})
     if _DELETE_PASSWORD:
-        supplied = str(body.get("password") or "")
+        supplied = _string_field(body, "password", required=False) or ""
         if not hmac.compare_digest(supplied, _DELETE_PASSWORD):
             raise _ApiError("Wrong or missing delete password.", status=403)
-    raw = str(_require(body, "image"))
+    raw = _string_field(body, "image")
     name = raw.rsplit("/", 1)[-1]  # accept a full /moments/<name> URL or bare name
     _delete_moment(name)
     notify_status_changed()
@@ -744,7 +820,8 @@ def _camera_delete(body: dict) -> dict:
 
 
 def _chat(body: dict) -> dict:
-    message = _require(body, "message")
+    _reject_unknown(body, {"message"})
+    message = _string_field(body, "message")
     if not _chat_available():
         return {"ok": False, "error": "Assistant is unavailable (LLM model not installed)."}
     try:

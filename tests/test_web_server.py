@@ -223,11 +223,10 @@ class LightsControlTests(unittest.TestCase):
         with self.assertRaises(web_server._ApiError):
             web_server._lights_control(self.c, {"targets": "all"})
 
-    def test_brightness_is_clamped(self):
-        web_server._lights_control(self.c, {"targets": "I1", "brightness": 500})
-        _, args, kwargs = self.c.calls[0]
-        self.assertEqual(args[0], "I1")
-        self.assertEqual(kwargs["brightness"], 100)
+    def test_out_of_range_brightness_is_rejected(self):
+        with self.assertRaises(web_server._ApiError):
+            web_server._lights_control(self.c, {"targets": "I1", "brightness": 500})
+        self.assertEqual(self.c.calls, [])
 
     def test_color_passthrough(self):
         web_server._lights_control(self.c, {"color": "#ff0000"})
@@ -242,6 +241,50 @@ class DeviceActionErrorTests(unittest.TestCase):
     def test_unknown_purifier_action_raises(self):
         with self.assertRaises(web_server._ApiError):
             web_server._purifier_action({"action": "explode"})
+
+
+class StrictRequestValidationTests(unittest.TestCase):
+    def test_light_power_rejects_non_booleans_without_dispatch(self):
+        controller = RecordingController()
+        for value in ("false", 0, "0", None):
+            with self.subTest(value=value):
+                with self.assertRaises(web_server._ApiError):
+                    web_server._lights_control(controller, {"power": value})
+        self.assertEqual(controller.calls, [])
+
+    def test_light_json_false_stays_false(self):
+        controller = RecordingController()
+        web_server._lights_control(controller, {"power": False})
+        self.assertIs(controller.calls[0][2]["power"], False)
+
+    def test_purifier_power_rejects_string_false_without_device_call(self):
+        with mock.patch.object(purifier, "turn_on") as turn_on, mock.patch.object(
+            purifier, "turn_off"
+        ) as turn_off:
+            with self.assertRaises(web_server._ApiError):
+                web_server._purifier_action({"action": "power", "value": "false"})
+        turn_on.assert_not_called()
+        turn_off.assert_not_called()
+
+    def test_camera_flash_rejects_string_false_without_capture(self):
+        controller = RecordingController()
+        with mock.patch.object(tapo, "capture_moment_for_model") as capture:
+            with self.assertRaises(web_server._ApiError):
+                web_server._camera_capture(controller, {"flash": "false"})
+        capture.assert_not_called()
+        self.assertEqual(controller.calls, [])
+
+    def test_booleans_are_not_accepted_as_integer_values(self):
+        with mock.patch.object(vacuum, "set_suction_level") as set_level:
+            with self.assertRaises(web_server._ApiError):
+                web_server._vacuum_action({"action": "suction", "value": True})
+        set_level.assert_not_called()
+
+    def test_unknown_fields_are_rejected(self):
+        controller = RecordingController()
+        with self.assertRaises(web_server._ApiError):
+            web_server._lights_control(controller, {"power": True, "typo": 1})
+        self.assertEqual(controller.calls, [])
 
 
 class VacuumRemoteOrderingTests(unittest.TestCase):
