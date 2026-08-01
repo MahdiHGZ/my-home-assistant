@@ -951,6 +951,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(_safe(_vacuum_rooms))
             elif path == "/api/moments":
                 self._send_json(_moments_summary())
+            elif path.startswith("/api/actions/"):
+                job_id = path.removeprefix("/api/actions/")
+                state = self._controller.job_state(job_id)
+                if state is None:
+                    raise _ApiError("No such action.", status=404)
+                self._send_json({"ok": True, "job": state})
             elif path.startswith("/moments/"):
                 query = self.path.split("?", 1)[1] if "?" in self.path else ""
                 download = "download=1" in query or "download=true" in query
@@ -994,8 +1000,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(e)}, status=e.status)
         except Exception as e:  # noqa: BLE001
             logger.exception("POST %s failed", path)
-            if e.__class__.__name__ == "QueueFullError":
+            if e.__class__.__name__ in {"QueueFullError", "ActionQueueFullError"}:
                 self._send_json({"ok": False, "error": "Too many requests. Please try again."}, status=429)
+            elif e.__class__.__name__ == "ActionInProgressError":
+                self._send_json(
+                    {
+                        "ok": True,
+                        "accepted": True,
+                        "job_id": e.job_id,
+                        "status_url": f"/api/actions/{e.job_id}",
+                    },
+                    status=202,
+                )
+            elif isinstance(e, TimeoutError):
+                self._send_json({"ok": False, "error": str(e)}, status=504)
             else:
                 self._send_json({"ok": False, "error": str(e)}, status=500)
 

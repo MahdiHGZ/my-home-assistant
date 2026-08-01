@@ -49,10 +49,14 @@ import queue
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
-import evdev
+try:
+    import evdev
+except ModuleNotFoundError:  # web/controller tests and web-only hosts need no evdev
+    evdev = None  # type: ignore[assignment]
 
 import tapo_camera_utils
 import xiaomi_vacuum_utils
@@ -67,6 +71,28 @@ _KEY_UP = 0
 _BRIGHTNESS_STEP = 20
 _CAPTURE_SETTLE_S = 2
 _FLASH_BLINK_OFF_S = 0.2
+_ACTION_QUEUE_SIZE = 5
+_JOB_HISTORY_SIZE = 100
+
+
+class ActionQueueFullError(Exception):
+    """The bounded controller queue cannot accept another action."""
+
+
+class ActionCancelledError(TimeoutError):
+    """An action timed out while queued and was cancelled before execution."""
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        super().__init__(f"Action {job_id} timed out and was cancelled before execution.")
+
+
+class ActionInProgressError(TimeoutError):
+    """The caller deadline expired after device I/O had already started."""
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        super().__init__(f"Action {job_id} is still running.")
 
 # ---------------------------------------------------------------------------
 # Data-driven key → mode mappings.
@@ -193,7 +219,9 @@ class Controller:
         # Last applied scene mode name (e.g. "movie"); None after all-off.
         # Surfaced via state() so remote panels can highlight the active mode.
         self._last_mode: str | None = None
-        self._queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._queue: queue.Queue[Callable[[], None]] = queue.Queue(maxsize=_ACTION_QUEUE_SIZE)
+        self._jobs_lock = threading.Lock()
+        self._jobs: dict[str, dict[str, object]] = {}
         # Called after every completed job (keypad or web). The web server
         # hooks this to push live status updates to connected browsers.
         self.on_action: Callable[[], None] | None = None
@@ -206,7 +234,10 @@ class Controller:
     def dispatch(self, keycode: str, *, combo: bool) -> None:
         """Queues a keypad action; returns immediately."""
         handler = self._handle_combo_key if combo else self._handle_single_key
-        self._queue.put(functools.partial(handler, keycode))
+        try:
+            self._queue.put_nowait(functools.partial(handler, keycode))
+        except queue.Full:
+            logger.warning("Controller queue full; dropping keypad action %s.", keycode)
 
     def _work_loop(self) -> None:
         while True:
@@ -221,10 +252,28 @@ class Controller:
                     callback()
                 except Exception:
                     logger.exception("on_action callback failed.")
+            self._queue.task_done()
 
-    class QueueFullError(Exception):
-        """Raised when the controller action queue is full."""
-        pass
+    QueueFullError = ActionQueueFullError  # compatibility for existing callers
+
+    def _record_job(self, job_id: str, **fields: object) -> None:
+        with self._jobs_lock:
+            if job_id not in self._jobs:
+                # Retain a bounded amount of diagnostic history, but never
+                # evict an active job just to make room.
+                if len(self._jobs) >= _JOB_HISTORY_SIZE:
+                    for old_id, info in list(self._jobs.items()):
+                        if info.get("status") in {"done", "failed", "cancelled"}:
+                            self._jobs.pop(old_id, None)
+                            break
+                self._jobs[job_id] = {"id": job_id}
+            self._jobs[job_id].update(fields)
+
+    def job_state(self, job_id: str) -> dict[str, object] | None:
+        """Return a copy of an asynchronous action's observable state."""
+        with self._jobs_lock:
+            state = self._jobs.get(job_id)
+            return dict(state) if state is not None else None
 
     def run_action(self, fn: Callable[..., object], *args, timeout: float = 60.0, **kwargs):
         """Runs an action on the worker thread and waits for its result.
@@ -234,23 +283,59 @@ class Controller:
         is returned to the caller, and any error is re-raised (unlike the
         keypad path, which only logs) so the HTTP layer can report it.
         """
-        if self._queue.qsize() >= 5:
-            raise QueueFullError("Too many pending actions in the queue.")
-
+        job_id = uuid.uuid4().hex
         box: dict[str, object] = {}
         done = threading.Event()
+        state_lock = threading.Lock()
+        phase = "queued"
+        self._record_job(
+            job_id,
+            action=getattr(fn, "__name__", str(fn)),
+            status=phase,
+            created_at=time.time(),
+        )
 
         def job() -> None:
+            nonlocal phase
+            with state_lock:
+                if phase == "cancelled":
+                    done.set()
+                    return
+                phase = "running"
+            self._record_job(job_id, status="running", started_at=time.time())
             try:
                 box["result"] = self._with_discovery_retry(fn, *args, **kwargs)
             except BaseException as e:  # noqa: BLE001 — relayed to the HTTP caller
                 box["error"] = e
             finally:
+                with state_lock:
+                    phase = "failed" if "error" in box else "done"
+                update: dict[str, object] = {"status": phase, "finished_at": time.time()}
+                if "error" in box:
+                    update["error"] = str(box["error"])
+                self._record_job(job_id, **update)
                 done.set()
 
-        self._queue.put(job)
+        try:
+            self._queue.put_nowait(job)
+        except queue.Full as e:
+            self._record_job(job_id, status="cancelled", error="queue full", finished_at=time.time())
+            raise ActionQueueFullError("Too many pending actions in the queue.") from e
         if not done.wait(timeout):
-            raise TimeoutError(f"Action {getattr(fn, '__name__', fn)} timed out after {timeout}s.")
+            with state_lock:
+                if phase == "queued":
+                    phase = "cancelled"
+                    self._record_job(
+                        job_id,
+                        status="cancelled",
+                        error="caller deadline expired before execution",
+                        finished_at=time.time(),
+                    )
+                    raise ActionCancelledError(job_id)
+                if phase == "running":
+                    # Running socket I/O cannot be safely killed. Report an
+                    # accepted job ID instead of telling the client it failed.
+                    raise ActionInProgressError(job_id)
         if "error" in box:
             raise box["error"]  # type: ignore[misc]
         return box.get("result")
@@ -540,6 +625,11 @@ def run_keyboard(
     ``required`` is False (so the caller can keep the web interface alive).
     Exits the process when the device is unavailable and ``required`` is True.
     """
+    if evdev is None:
+        logger.error("The evdev package is unavailable; keypad input is disabled.")
+        if required:
+            raise SystemExit(1)
+        return False
     try:
         device = evdev.InputDevice(device_path)
     except (FileNotFoundError, PermissionError) as e:
