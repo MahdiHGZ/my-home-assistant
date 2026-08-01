@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import socket
 import threading
 import time
@@ -312,6 +313,62 @@ def _num(value, default):
         return default
 
 
+def _ct_to_rgb(kelvin: int) -> tuple[int, int, int]:
+    """Approximate an RGB color for a white color-temperature (Tanner Helland)."""
+    k = max(1000, min(40000, kelvin)) / 100.0
+    if k <= 66:
+        r = 255.0
+        g = 99.4708025861 * math.log(k) - 161.1195681661
+    else:
+        r = 329.698727446 * ((k - 60) ** -0.1332047592)
+        g = 288.1221695283 * ((k - 60) ** -0.0755148492)
+    if k >= 66:
+        b = 255.0
+    elif k <= 19:
+        b = 0.0
+    else:
+        b = 138.5177312231 * math.log(k - 10) - 305.0447927307
+    clamp = lambda v: int(max(0.0, min(255.0, v)))  # noqa: E731
+    return clamp(r), clamp(g), clamp(b)
+
+
+def _bulb_display_hex(bulb: dict) -> str:
+    """The 6-hex ``RRGGBB`` the panel should paint for one bulb.
+
+    ``"000000"`` means off/unknown (the panel draws it as an empty ring). The
+    hue reflects the bulb's live color mode (RGB, or white color-temperature),
+    dimmed toward — but never fully to — black by its brightness so a faint bulb
+    still reads as its color.
+    """
+    if str(bulb.get("current_power")) != "on":
+        return "000000"
+    mode = _num(bulb.get("current_color_mode"), 0)
+    if mode == 2:  # white color-temperature
+        r, g, b = _ct_to_rgb(_num(bulb.get("current_color_temp"), 4000))
+    else:          # RGB (1) / HSV (3) / unknown -> last known rgb int
+        rgb = _num(bulb.get("current_rgb"), -1)
+        if rgb < 0:
+            r, g, b = 255, 214, 170  # warm-white fallback
+        else:
+            r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+    scale = max(0.4, min(1.0, _num(bulb.get("current_brightness"), 100) / 100.0))
+    return f"{int(r * scale):02X}{int(g * scale):02X}{int(b * scale):02X}"
+
+
+def _bulb_grid_hex(bulbs: list, registered_names: list) -> str:
+    """Concatenated ``RRGGBB`` per registered bulb, in sorted-name order.
+
+    The panel lays these out column-major into its I1 I4 / I2 I5 / I3 I6 grid,
+    so index order = sorted names = I1, I2, I3, I4, I5, I6.
+    """
+    by_name = {str(b.get("name")): b for b in bulbs}
+    names = registered_names or sorted(by_name.keys())
+    return "".join(
+        _bulb_display_hex(by_name[n]) if n in by_name else "000000"
+        for n in names
+    )
+
+
 def flatten_status(snapshot: dict, hour: Optional[int] = None) -> dict:
     """Reduce the full status snapshot to the flat ~250-byte panel payload.
 
@@ -325,6 +382,7 @@ def flatten_status(snapshot: dict, hour: Optional[int] = None) -> dict:
 
     lights = snapshot.get("lights") or {}
     bulbs = lights.get("bulbs") or []
+    registered_names = lights.get("registered_names") or []
     state = lights.get("state") or {}
     vac = snapshot.get("vacuum") or {}
     pur = snapshot.get("purifier") or {}
@@ -341,6 +399,7 @@ def flatten_status(snapshot: dict, hour: Optional[int] = None) -> dict:
         "lights_avail": bool(lights.get("available")),
         "bulbs_on": sum(1 for b in bulbs if str(b.get("current_power")) == "on"),
         "bulbs_total": len(bulbs),
+        "bulb_rgb": _bulb_grid_hex(bulbs, registered_names),
         "brightness": brightness,
         "last_mode": state.get("last_mode"),
         "vac_avail": bool(vac.get("available")),

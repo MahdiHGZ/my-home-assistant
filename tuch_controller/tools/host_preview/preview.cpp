@@ -61,8 +61,16 @@ static void savePNG(const std::string& path, int scale) {
 static void sampleState() {
   st = DeviceState{};
   st.valid = true;
-  st.lightsAvail = true; st.bulbsOn = 6; st.bulbsTotal = 6;
+  st.lightsAvail = true; st.bulbsOn = 5; st.bulbsTotal = 6;
   strlcpy(st.lightMode, "warm white", sizeof(st.lightMode));
+  // Live per-bulb colors (I1..I6, sorted-name order) for the LIGHTS tile grid.
+  st.bulbCount = 6;
+  st.bulbCol[0] = tft.color565(255, 180, 90);   // I1 warm white
+  st.bulbCol[1] = tft.color565(255, 80, 80);    // I2 red
+  st.bulbCol[2] = tft.color565(120, 200, 255);  // I3 sky
+  st.bulbCol[3] = tft.color565(180, 120, 255);  // I4 violet
+  st.bulbCol[4] = 0;                             // I5 off
+  st.bulbCol[5] = tft.color565(90, 235, 160);   // I6 mint
   st.vacAvail = true; strlcpy(st.vacStatus, "Charging Complete", sizeof(st.vacStatus)); st.vacBattery = 100;
   st.purAvail = true; st.purOn = true;
   strlcpy(st.purMode, "Auto", sizeof(st.purMode));
@@ -80,6 +88,7 @@ int main(int argc, char** argv) {
   std::string out = (argc > 1) ? argv[1] : "preview";
 
   tft.setRotation(1);   // landscape 320x240 — the firmware does this in setup()
+  tft.cp437(true);      // match setup(): degree (0xF8) / micro (0xE6) glyphs
   applyTheme(true);     // dark palette -> COL_* runtime vars
 
   struct PG { Page p; const char* name; } pages[] = {

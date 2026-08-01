@@ -197,6 +197,8 @@ struct DeviceState {
   int bulbsOn = 0;
   int bulbsTotal = 0;
   char lightMode[16] = "";   // lights.state.last_mode (BulbMode.name)
+  uint16_t bulbCol[6] = { 0, 0, 0, 0, 0, 0 };  // live per-bulb RGB565 (0 = off)
+  int bulbCount = 0;                           // bulbs reported this snapshot (<=6)
 
   bool vacAvail = false;
   char vacStatus[24] = "";
@@ -443,6 +445,22 @@ uint16_t hsvTo565(int hue, int sat) {
   return tft.color565(r, g, b);
 }
 
+// Representative color for each lighting mode (index matches MODE_LABELS:
+// COOL, WARM, SUNSET, SLEEP, LOVE, MOVIE). Mirrors updateAliveTint()'s vibe map
+// so mode swatches and the living background agree. (§2 mode color swatches)
+uint16_t modeVibe565(int idx) {
+  uint8_t r, g, b;
+  switch (idx) {
+    case 0:  r = 170; g = 205; b = 255; break;  // COOL   icy blue
+    case 1:  r = 255; g = 168; b = 70;  break;  // WARM   amber
+    case 2:  r = 255; g = 120; b = 60;  break;  // SUNSET orange
+    case 3:  r = 120; g = 95;  b = 190; break;  // SLEEP  violet
+    case 4:  r = 255; g = 75;  b = 120; break;  // LOVE   pink
+    default: r = 150; g = 80;  b = 225; break;  // MOVIE  purple
+  }
+  return tft.color565(r, g, b);
+}
+
 // =====================================================================
 // v2 liquid-glass rendering primitives
 // =====================================================================
@@ -588,127 +606,11 @@ Btn* findBtn(int8_t id) {
 }
 
 // --------------------------------------------------
-// Icons (GFX primitives, centered on cx/cy)
+// Icons (GFX primitives, centered on cx/cy) — full library lives in icons.h.
+// Included here (after `tft` + Adafruit_GFX are in scope) so every draw path
+// below can use icon*() freely; add new glyphs to icons.h, not this file.
 // --------------------------------------------------
-void iconBulb(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillCircle(cx, cy - 3, 11, color);
-  tft.fillRect(cx - 5, cy + 7, 10, 4, color);
-  tft.fillRect(cx - 3, cy + 12, 6, 3, color);
-  tft.drawLine(cx - 17, cy - 15, cx - 13, cy - 11, color);
-  tft.drawLine(cx + 17, cy - 15, cx + 13, cy - 11, color);
-  tft.drawLine(cx, cy - 21, cx, cy - 16, color);
-}
-
-void iconVacuum(int16_t cx, int16_t cy, uint16_t color) {
-  tft.drawCircle(cx, cy, 14, color);
-  tft.drawCircle(cx, cy, 13, color);
-  tft.fillCircle(cx, cy, 4, color);
-  tft.drawLine(cx - 9, cy - 8, cx + 9, cy - 8, color);
-}
-
-void iconFanBlades(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
-  tft.fillCircle(cx, cy - 9, 6, color);
-  tft.fillCircle(cx - 8, cy + 5, 6, color);
-  tft.fillCircle(cx + 8, cy + 5, 6, color);
-  tft.fillCircle(cx, cy, 3, bg);
-}
-
-void iconPlay(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillTriangle(cx - 7, cy - 10, cx - 7, cy + 10, cx + 11, cy, color);
-}
-
-void iconStopSq(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillRect(cx - 9, cy - 9, 18, 18, color);
-}
-
-void iconPause(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillRect(cx - 8, cy - 8, 6, 16, color);
-  tft.fillRect(cx + 2, cy - 8, 6, 16, color);
-}
-
-void iconDock(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillTriangle(cx - 10, cy - 1, cx + 10, cy - 1, cx, cy - 10, color);
-  tft.fillRect(cx - 7, cy - 1, 14, 9, color);
-}
-
-void iconFind(int16_t cx, int16_t cy, uint16_t color) {
-  tft.drawCircle(cx, cy, 9, color);
-  tft.fillCircle(cx, cy, 3, color);
-}
-
-void iconPower(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
-  tft.drawCircle(cx, cy + 1, 9, color);
-  tft.drawCircle(cx, cy + 1, 8, color);
-  tft.fillRect(cx - 2, cy - 11, 5, 10, bg);
-  tft.fillRect(cx - 1, cy - 10, 3, 10, color);
-}
-
-void iconSun(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillCircle(cx, cy, 7, color);
-  for (int i = 0; i < 8; i++) {
-    float a = i * PI / 4.0f;
-    int16_t x1 = cx + (int16_t)(cosf(a) * 10);
-    int16_t y1 = cy + (int16_t)(sinf(a) * 10);
-    int16_t x2 = cx + (int16_t)(cosf(a) * 14);
-    int16_t y2 = cy + (int16_t)(sinf(a) * 14);
-    tft.drawLine(x1, y1, x2, y2, color);
-  }
-}
-
-void iconBack(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillTriangle(cx + 7, cy - 11, cx + 7, cy + 11, cx - 9, cy, color);
-}
-
-void iconHeart(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillCircle(cx - 5, cy - 3, 6, color);
-  tft.fillCircle(cx + 5, cy - 3, 6, color);
-  tft.fillTriangle(cx - 10, cy, cx + 10, cy, cx, cy + 11, color);
-}
-
-void iconMovie(int16_t cx, int16_t cy, uint16_t color) {
-  tft.drawRect(cx - 11, cy - 8, 22, 16, color);
-  tft.drawRect(cx - 10, cy - 7, 20, 14, color);
-  tft.fillTriangle(cx - 3, cy - 4, cx - 3, cy + 4, cx + 5, cy, color);
-}
-
-void iconDots(int16_t cx, int16_t cy, uint16_t color) {
-  tft.fillCircle(cx - 10, cy, 3, color);
-  tft.fillCircle(cx,      cy, 3, color);
-  tft.fillCircle(cx + 10, cy, 3, color);
-}
-
-void iconDice(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
-  tft.fillRoundRect(cx - 13, cy - 13, 26, 26, 5, color);
-  tft.fillCircle(cx - 6, cy - 6, 2, bg);
-  tft.fillCircle(cx + 6, cy - 6, 2, bg);
-  tft.fillCircle(cx,     cy,     2, bg);
-  tft.fillCircle(cx - 6, cy + 6, 2, bg);
-  tft.fillCircle(cx + 6, cy + 6, 2, bg);
-}
-
-void iconCamera(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
-  tft.fillRoundRect(cx - 13, cy - 8, 26, 18, 3, color);
-  tft.fillRect(cx - 5, cy - 12, 10, 4, color);   // top hump
-  tft.fillCircle(cx, cy + 1, 6, bg);             // lens hole
-  tft.fillCircle(cx, cy + 1, 4, color);          // lens
-}
-
-void iconGear(int16_t cx, int16_t cy, uint16_t color, uint16_t bg) {
-  for (int i = 0; i < 8; i++) {
-    float a = i * PI / 4.0f;
-    int16_t tx = cx + (int16_t)(cosf(a) * 11);
-    int16_t ty = cy + (int16_t)(sinf(a) * 11);
-    tft.fillCircle(tx, ty, 3, color);            // teeth
-  }
-  tft.fillCircle(cx, cy, 9, color);
-  tft.fillCircle(cx, cy, 4, bg);                 // hub hole
-}
-
-void iconRefresh(int16_t cx, int16_t cy, uint16_t color) {
-  tft.drawCircle(cx, cy, 9, color);
-  tft.drawCircle(cx, cy, 8, color);
-  tft.fillTriangle(cx + 5, cy - 13, cx + 5, cy - 3, cx + 13, cy - 8, color);
-}
+#include "icons.h"
 
 // --------------------------------------------------
 // Text helpers — size >= 2 uses the FreeSansBold font (much more legible
@@ -830,13 +732,10 @@ void islandDots() {
   tft.drawCircle(ISL_X + 22, ISL_CY + 3, 5, connColor());
   tft.drawCircle(ISL_X + 22, ISL_CY + 3, 3, connColor());
   tft.fillCircle(ISL_X + 22, ISL_CY + 5, 1, connColor());
+  // In-flight indicator (right): accent dot while an HTTP request is queued or
+  // running. (The panel is mains-powered — no battery, so no battery gauge.)
   bool busy = workerBusy || (apiQueue && uxQueueMessagesWaiting(apiQueue) > 0);
-  uint16_t rc = busy ? COL_ACCENT : UI_DIM;
-  int16_t bx = ISL_X + ISL_W - 55;
-  tft.drawRect(bx, ISL_CY - 4, 14, 8, rc);
-  tft.fillRect(bx + 2, ISL_CY - 2, 10, 4, rc);
-  tft.fillRect(bx + 15, ISL_CY - 2, 2, 4, rc);
-  drawLeftText("100%", bx + 22, ISL_CY - 4, 1, UI_MUTED);
+  tft.fillCircle(ISL_X + ISL_W - 14, ISL_CY, 3, busy ? COL_ACCENT : UI_DIM);
 }
 
 // Replace just the central text of the island (keeps the shell + dots).
@@ -1205,6 +1104,28 @@ uint16_t modeAccent(int id) {
   }
 }
 
+// LIGHTS tile: 2x3 grid of live per-bulb color dots. Positions are column-major
+// so they read exactly as the physical layout I1 I4 / I2 I5 / I3 I6 (order from
+// yeelight_bulb_utils.py). `fill` is the tile's panel color, used to wipe stale
+// dots on live refreshes. A 0 color means the bulb is off (drawn as a ring).
+void drawBulbGrid(Btn& b, uint16_t fill) {
+  if (!(st.valid && st.lightsAvail && st.bulbCount > 0)) return;
+  tft.fillRect(b.x + 58, b.y + 14, 27, 39, fill);
+  int16_t gx0 = b.x + 62, gx1 = b.x + 80;
+  int16_t gy0 = b.y + 18, rowH = 15;
+  for (int i = 0; i < st.bulbCount && i < 6; i++) {
+    int16_t dx = (i < 3) ? gx0 : gx1;
+    int16_t dy = gy0 + (i % 3) * rowH;
+    uint16_t col = st.bulbCol[i];
+    if (col == 0) {
+      tft.drawCircle(dx, dy, 3, UI_BORDER);                 // off / unknown
+    } else {
+      tft.fillCircle(dx, dy, 3, col);
+      tft.drawCircle(dx, dy, 3, blend565(0xFFFF, col, 55)); // subtle rim
+    }
+  }
+}
+
 void drawDashboardTile(Btn& b, bool pressed) {
   uint16_t accent = UI_SKY;
   const char* name = b.label;
@@ -1227,8 +1148,8 @@ void drawDashboardTile(Btn& b, bool pressed) {
       else strlcpy(value, st.valid ? "offline" : "syncing", sizeof(value));
       break;
     case ID_NAV_AIR:
-      accent = UI_EMERALD; name = "PURIFIER"; glow = st.valid && st.purAvail && st.purOn;
-      if (st.valid && st.purAvail && st.pm25 >= 0) snprintf(value, sizeof(value), "%d ug/m3", st.pm25);
+      accent = UI_EMERALD; glow = st.valid && st.purAvail && st.purOn;
+      if (st.valid && st.purAvail && st.pm25 >= 0) snprintf(value, sizeof(value), "%d \xE6g/m3", st.pm25);
       else strlcpy(value, st.valid ? "offline" : "syncing", sizeof(value));
       break;
     case ID_NAV_CAM:
@@ -1252,9 +1173,12 @@ void drawDashboardTile(Btn& b, bool pressed) {
 
   int16_t ix = b.x + 22, iy = b.y + 25;
   switch (b.id) {
-    case ID_NAV_LIGHTS: iconBulb(ix, iy, accent); break;
+    case ID_NAV_LIGHTS:
+      // Bulb glows in the live bulb color when on; muted when off/offline.
+      iconBulb(ix, iy, glow ? tft.color565(aliveR, aliveG, aliveB) : UI_MUTED);
+      break;
     case ID_NAV_VACUUM: iconVacuum(ix, iy, accent); break;
-    case ID_NAV_AIR: iconSun(ix, iy, accent); break;
+    case ID_NAV_AIR: iconFanBlades(ix, iy, accent, fill); break;
     case ID_NAV_CAM: iconCamera(ix, iy, accent, fill); break;
     case ID_NAV_SET: iconGear(ix, iy, UI_MUTED, fill); break;
     case ID_SCENE_NIGHT:
@@ -1262,12 +1186,16 @@ void drawDashboardTile(Btn& b, bool pressed) {
       tft.fillCircle(ix + 6, iy - 4, 10, fill);
       break;
   }
+  bool bulbGrid = (b.id == ID_NAV_LIGHTS && st.valid && st.lightsAvail && st.bulbCount > 0);
+  if (bulbGrid) drawBulbGrid(b, fill);
+
   if (b.id == ID_NAV_VACUUM && st.vacBattery >= 0) {
     char bat[6];
     snprintf(bat, sizeof(bat), "%d%%", st.vacBattery);
     softPanel(b.x + b.w - 34, b.y + 10, 26, 10, 3, uiTint(UI_SKY, 45), uiTint(UI_SKY, 20));
     drawCenteredText(bat, b.x + b.w - 21, b.y + 15, 1, UI_SKY);
-  } else if (b.id == ID_NAV_LIGHTS || b.id == ID_NAV_AIR || b.id == ID_NAV_CAM || b.id == ID_SCENE_NIGHT) {
+  } else if (b.id == ID_NAV_AIR || b.id == ID_NAV_CAM || b.id == ID_NAV_SET ||
+             b.id == ID_SCENE_NIGHT || (b.id == ID_NAV_LIGHTS && !bulbGrid)) {
     tft.fillCircle(b.x + b.w - 13, b.y + 13, 3, glow ? accent : UI_BORDER);
   }
 
@@ -1311,7 +1239,7 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
       uint16_t c = (b.id == ID_MODE4) ? UI_ROSE : (b.id == ID_MODE5 ? UI_SKY : UI_MUTED);
       softPanel(b.x, b.y, b.w, b.h, 12, selected ? uiTint(c, 105) : UI_BORDER,
                 selected ? uiTint(c, 28) : uiPanelFill(pressed));
-      if (b.id == ID_MODE5) iconPlay(b.x + 25, cy, c);
+      if (b.id == ID_MODE5) iconMovie(b.x + 25, cy, c);
       else if (b.id == ID_MODE4) iconHeart(b.x + 25, cy, c);
       else iconDots(b.x + 25, cy, c);
       drawLeftTextFit(label, b.x + 44, cy - 4, 1, UI_TEXT, b.w - 50);
@@ -1337,8 +1265,26 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
   }
 
   if (currentPage == PAGE_MODES && b.id >= ID_MODE0 && b.id <= ID_MODE5) {
+    int idx = b.id - ID_MODE0;
     uint16_t c = modeAccent(b.id);
-    drawCompactButton(b, MODE_LABELS[b.id - ID_MODE0], c, pressed, selected);
+    uint16_t border = selected ? uiTint(c, 105) : UI_BORDER;
+    uint16_t fill = selected ? uiTint(c, 28) : uiPanelFill(pressed);
+    softPanel(b.x, b.y, b.w, b.h, 12, border, fill);
+    // Scene icon in the mode's representative hue, so each scene is recognizable
+    // by shape + color (COOL snowflake, WARM sun, SUNSET dome, SLEEP moon,
+    // LOVE heart, MOVIE film), then the label beside it.
+    uint16_t sw = modeVibe565(idx);
+    int16_t ix = b.x + 22;
+    switch (idx) {
+      case 0:  iconSnowflake(ix, cy, sw); break;
+      case 1:  iconSun(ix, cy, sw); break;
+      case 2:  iconSunset(ix, cy, sw, fill); break;
+      case 3:  iconMoon(ix, cy, sw, fill); break;
+      case 4:  iconHeart(ix, cy, sw); break;
+      default: iconMovie(ix, cy, sw); break;
+    }
+    drawCenteredTextFit(MODE_LABELS[idx], b.x + 64, cy, 1,
+                        selected ? c : UI_TEXT, b.w - 46);
     return true;
   }
 
@@ -1390,11 +1336,16 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
 
   if (currentPage == PAGE_CAM) {
     if (b.id == ID_CAP_VIEW) {
+      // Still-photo preview target — not a live video feed. Keep the framing
+      // brackets as a viewfinder motif but drop the fake REC/CH/zoom chrome.
       softPanel(b.x, b.y, b.w, b.h, 12, UI_BORDER_2, 0x0000);
-      drawLeftText("REC 60FPS", b.x + 8, b.y + 10, 1, UI_DIM);
-      drawLeftText("CH1", b.x + b.w - 28, b.y + 10, 1, UI_DIM);
+      drawLeftText("LAST PHOTO", b.x + 8, b.y + 10, 1, UI_DIM);
+      if (st.moments >= 0) {
+        char m[8];
+        snprintf(m, sizeof(m), "%d", st.moments);
+        drawLeftText(m, b.x + b.w - 18, b.y + 10, 1, UI_DIM);
+      }
       drawLeftText("320x240", b.x + 8, b.y + b.h - 14, 1, UI_DIM);
-      drawLeftText("1.0X", b.x + b.w - 32, b.y + b.h - 14, 1, UI_DIM);
       tft.drawFastHLine(cx - 20, cy - 20, 12, UI_EMERALD);
       tft.drawFastVLine(cx - 20, cy - 20, 12, UI_EMERALD);
       tft.drawFastHLine(cx + 8, cy - 20, 12, UI_EMERALD);
@@ -1403,7 +1354,7 @@ bool drawHtmlButton(Btn& b, bool pressed, bool selected, const char* label) {
       tft.drawFastVLine(cx - 20, cy + 8, 12, UI_EMERALD);
       tft.drawFastHLine(cx + 8, cy + 20, 12, UI_EMERALD);
       tft.drawFastVLine(cx + 20, cy + 8, 12, UI_EMERALD);
-      drawCenteredTextFit("ROOM EYE LIVE", cx, cy, 1, UI_MUTED, b.w - 16);
+      drawCenteredTextFit("TAP TO VIEW", cx, cy, 1, UI_MUTED, b.w - 16);
       return true;
     }
     if (b.id == ID_CAP) {
@@ -1808,7 +1759,7 @@ void drawAirValues() {
   } else airTileValue(0, "-", COL_DIM);
 
   if (st.tempC > -999) {
-    snprintf(buf, sizeof(buf), "%d C", st.tempC);
+    snprintf(buf, sizeof(buf), "%d\xF8" "C", st.tempC);   // 0xF8 = degree (CP437)
     airTileValue(1, buf, COL_TEXT);
   } else airTileValue(1, "-", COL_DIM);
 
@@ -1844,7 +1795,7 @@ void drawPage() {
 
   if (currentPage == PAGE_COLOR) {
     char hv[10], sv[8];
-    snprintf(hv, sizeof(hv), "%d deg", curHue);
+    snprintf(hv, sizeof(hv), "%d\xF8", curHue);   // 0xF8 = degree (CP437)
     snprintf(sv, sizeof(sv), "%d%%", curSat);
     drawLeftText("HUE (GRADIENT)", 13, 84, 1, UI_DIM);
     drawLeftText(hv, 268, 84, 1, UI_DIM);
@@ -1870,6 +1821,8 @@ void refreshDynamic() {
       int n;
       Btn* btns = pageButtons(n);
       for (int i = 0; i < n; i++) drawCardSub(btns[i]);
+      Btn* lb = findBtn(ID_NAV_LIGHTS);   // keep per-bulb color dots live
+      if (lb) drawBulbGrid(*lb, uiTint(0xFFFF, 7));
       break;
     }
     case PAGE_LIGHTS: {
@@ -2038,6 +1991,14 @@ void applyStatusJson(const String& js) {
   st.bulbsOn     = jsonInt(js, "bulbs_on", 0);
   st.bulbsTotal  = jsonInt(js, "bulbs_total", 0);
   strlcpy(st.lightMode, jsonStr(js, "last_mode").c_str(), sizeof(st.lightMode));
+  // Per-bulb colors: flat "RRGGBB" groups (I1..I6, sorted-name order); 0 = off.
+  st.bulbCount = 0;
+  String bh = jsonStr(js, "bulb_rgb");
+  for (int i = 0; i + 6 <= (int)bh.length() && st.bulbCount < 6; i += 6) {
+    long v = strtol(bh.substring(i, i + 6).c_str(), nullptr, 16);
+    st.bulbCol[st.bulbCount++] =
+        (v <= 0) ? 0 : tft.color565((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+  }
   if (dragId != ID_BRIGHT) {
     int b = jsonInt(js, "brightness", -1);
     if (b >= 1 && b <= 100) curBrightness = b;
@@ -2422,25 +2383,25 @@ void sendHueColor() {
   apiAndReport("/api/lights/control", body, msg);
 }
 
-// Full-screen diagnostics overlay (SETUP -> DIAG). Tap anywhere to close.
-// Surfaces what's otherwise only visible over USB serial. (§7.6)
-// Full-screen DEVICE info (SETUP -> DEVICE). Everything you'd want to know about
-// the panel and its link to the server, in a label/value list. Tap to close.
+// DEVICE info (SETUP -> INFO): everything worth knowing about the panel and its
+// link to the server, in a label/value list. Uses the same page chrome as the
+// rest of the UI (Dynamic Island + BACK button); BACK returns to SETUP. (§7.6)
 void showDeviceInfo() {
-  tft.fillScreen(COL_BG);
-  drawLeftText("TELEMETRY DIAGNOSTIC", 28, 14, 1, UI_TEXT);
-  tft.drawCircle(18, 15, 7, UI_SKY);
-  tft.fillCircle(18, 11, 1, UI_SKY);
-  tft.fillRect(17, 15, 3, 5, UI_SKY);
-  drawLeftText("ESP32-S3", 256, 14, 1, UI_DIM);
-  tft.drawFastHLine(12, 27, 296, UI_BORDER);
+  drawBackground();
+  // Same chrome as the other pages: BACK button top-left + Dynamic Island.
+  Btn backBtn = { 12, 31, 48, 36, "", ID_BACK };
+  drawBtn(backBtn, false);
+  drawIsland();
+  drawCenteredText("DEVICE INFO", 160, 49, 1, UI_DIM);
+  // Header underline sits below the BACK button so it never cuts through it.
+  tft.drawFastHLine(12, 70, 296, UI_BORDER);
 
   char v[64];
   bool wifi = (WiFi.status() == WL_CONNECTED);
   auto row = [&](int col, int row, const char* k, const char* val, uint16_t c) {
     int16_t x = col == 0 ? 14 : 168;
     int16_t vx = col == 0 ? 76 : 238;
-    int16_t y = 44 + row * 16;
+    int16_t y = 78 + row * 16;
     drawLeftText(k, x, y, 1, UI_DIM);
     drawLeftTextFit(val, vx, y, 1, c, col == 0 ? 78 : 68);
   };
@@ -2473,9 +2434,9 @@ void showDeviceInfo() {
   snprintf(v, sizeof(v), "%u MB", (unsigned)(ESP.getFlashChipSize() / (1024 * 1024)));
   row(1, 5, "FLASH", v, UI_TEXT);
 
-  tft.drawFastVLine(160, 36, 102, UI_BORDER);
-  tft.drawFastHLine(12, 212, 296, UI_BORDER);
-  drawCenteredText("TAP ANYWHERE TO EXIT DIAGNOSTIC", 160, 226, 1, UI_DIM);
+  tft.drawFastVLine(160, 74, 100, UI_BORDER);
+  // Chip identity as a tidy centered footer (was crowding the header's right edge).
+  drawCenteredText("ESP32-S3", 160, 200, 1, UI_DIM);
   diagActive = true;
   ignoreUntilRelease = true;
   lastActivityMs = millis();
@@ -2868,15 +2829,28 @@ void updateTouch() {
   prevTouch = touching;
   if (rising) { pressDownX = x; pressDownY = y; }
 
-  // An alert popup, photo preview, or diagnostics overlay covers the screen:
-  // any tap dismisses.
-  if (alertActive || previewActive || diagActive) {
+  // An alert popup or photo preview covers the screen: any tap dismisses.
+  if (alertActive || previewActive) {
     if (touching && !ignoreUntilRelease) {
       alertActive = false;
       previewActive = false;
-      diagActive = false;
       ignoreUntilRelease = true;
       drawPage();
+    } else if (!touching) {
+      ignoreUntilRelease = false;
+    }
+    return;
+  }
+
+  // DEVICE info behaves like a page: only the BACK button (top-left) exits.
+  if (diagActive) {
+    bool onBack = touching &&
+                  x >= 12 - HIT_SLOP && x <= 12 + 48 + HIT_SLOP &&
+                  y >= 31 - HIT_SLOP && y <= 31 + 36 + HIT_SLOP;
+    if (onBack && !ignoreUntilRelease) {
+      diagActive = false;
+      ignoreUntilRelease = true;
+      drawPage();   // currentPage is still PAGE_SET -> back to SETUP
     } else if (!touching) {
       ignoreUntilRelease = false;
     }
@@ -3148,6 +3122,7 @@ void setup() {
 
   tft.begin(TFT_SPI_HZ);  // push the shared SPI bus (§6.1)
   tft.setRotation(1);     // Landscape 320x240
+  tft.cp437(true);        // correct CP437 map so degree (0xF8) / micro (0xE6) render
   tft.fillScreen(COL_BG); // clear the init garbage while still dark
 
   ts.begin(tftSPI);

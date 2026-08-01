@@ -1,62 +1,97 @@
-# tuch_controller — Liquid-Glass Design Notes
+# tuch_controller — UI Design Notes
 
 The firmware pairs a proven backend — FreeRTOS HTTP worker, SSE sync, touch +
 calibration, sleep ladder, OTA, the whole `/api/panel/*` contract — with a
-"liquid glass" visual layer: it is only the rendering primitives and how
-buttons/cards are painted that make this look distinct. For wiring, build steps,
-server API, and troubleshooting see `HARDWARE.md`.
+compact, **flat dark "HTML-inspired" UI**: solid rounded panels with a thin
+border and a per-device accent color, a Dynamic Island tab along the top edge,
+and big touch targets sized for a low-sensitivity resistive panel. For wiring,
+build steps, server API, and troubleshooting see `HARDWARE.md`.
+
+> **Renderer note.** The look is drawn by the `softPanel` / `drawHtmlButton`
+> path (the `UI_*` palette). The older `glass*` primitives (`glassPanel`,
+> `glassBody`, `glassCircle`, `glassRing`) are **legacy and currently unused** —
+> `drawBtn()` calls `drawHtmlButton()` first, which handles every button and
+> returns early. See `SUGGESTIONS.md` (§2) for the "revive glass vs. keep flat"
+> decision. This document describes what actually renders.
 
 ## The look
 
-Apple-style **liquid glass**: frosted, translucent panels that float over the
-dark background, with **circular borders** as the signature motif — circular
-icon badges on the dashboard, frosted *circles* for square buttons, and
-glowing accent rings on selection.
+Flat, modern, dark. Every control is a `softPanel` — a filled rounded rect with
+a 1px border (`softPanel(x,y,w,h,r,border,fill)`). Depth and state come from
+**color**, not gradients:
 
-## How "glass" works without a GPU
+- **Resting**: near-black panel fill (`UI_PANEL` / a faint white tint) with a
+  subtle `UI_BORDER`.
+- **Pressed**: brighter fill (`UI_PANEL_HI`).
+- **Selected / active**: accent-tinted fill (`uiTint(accent, 28)`), an
+  accent-colored border (`uiTint(accent, 105)`), and accent-colored text.
 
-The ILI9341 has no alpha/blur hardware and the ESP32-S3 can't afford to read
-back framebuffer pixels. So glass is faked with three cheap tricks:
+Each domain has a signature accent so a glance reads the page: **lights → pink**,
+**vacuum → sky blue**, **purifier → emerald**, **camera → purple**,
+**settings/night → zinc**, plus **amber** for warmth/brightness and **rose** for
+stop/capture. All are RGB565 constants (`UI_*`) kept cheap for the ESP32/ILI9341.
 
-1. **Software alpha blend** (`blend565`): mix a light *tint* (white on the dark
-   theme, ink on light) over the solid background `COL_BG` at low opacity to get
-   a frosted body. The background stays a solid fill, so the frost reads as a
-   translucent sheet laid on top.
-2. **Per-row tint = pure function of the row** (`glassBody(dy, h, style)`): the
-   frost gets a subtle top-down *sheen* (brighter at the top edge). Because the
-   color depends only on the row within a panel, any partial repaint
-   (`glassErase`) can reproduce the exact same pixels — no full-screen redraw
-   and no flicker. This is what keeps live values (PM2.5, battery, brightness)
-   updating smoothly on top of glass.
-3. **Edge highlights**: a bright 1px sheen line just inside the top border plus a
-   soft light border (`glassEdge`) sell the "pane of glass" edge. Selection
-   swaps the border for a double **accent ring**.
+## Palette (`UI_*`, RGB565)
 
-### States
+| Token | Use |
+|---|---|
+| `UI_BG` / `UI_BG2` | app background / pure black |
+| `UI_PANEL` / `UI_PANEL_HI` | panel fill / pressed fill |
+| `UI_BORDER` / `UI_BORDER_2` | resting border / stronger border |
+| `UI_TEXT` / `UI_MUTED` / `UI_DIM` | primary / secondary / faint text |
+| `UI_SKY` `UI_EMERALD` `UI_AMBER` `UI_ROSE` `UI_PINK` `UI_PURPLE` `UI_ZINC` | accents |
 
-| Style | Meaning | Treatment |
-|---|---|---|
-| `GS_NORMAL` | resting | low-opacity frost + soft light border |
-| `GS_PRESSED` | finger down | denser frost (more opaque) |
-| `GS_SELECTED` | active mode/fan/state | accent-tinted frost + double accent ring |
+`uiTint(color, a)` alpha-blends an accent over `UI_BG` (via `blend565`) to get
+the tinted fills/borders. A separate light theme flips `COL_*` at runtime
+(`applyTheme`), NVS-persisted.
 
-### Shapes
+## Dashboard tiles (MAIN)
 
-- `glassPanel(x,y,w,h,r,style)` — frosted **rounded** panel (most buttons, cards,
-  status strips, the alert CLOSE pill).
-- `glassCircle(cx,cy,rad,style)` — frosted **disc**; square-ish small buttons
-  (e.g. the brightness OFF/ON keys) render as circles.
-- `glassRing(cx,cy,rad)` — decorative circular **icon badge** behind the glyphs on
-  the MAIN dashboard tiles (LIGHTS / VACUUM / AIR / CAMERA / SETUP).
-- `glassErase(x,y,w,h,panelY,panelH,style)` — repaint a sub-band of an existing
-  panel by recomputing its frost (used by card sub-text and live value tiles).
+`drawDashboardTile()` renders the six MAIN tiles (LIGHTS / VACUUM / PURIFIER /
+CAMERA / SETTINGS / NIGHT). Each tile has:
+
+- a **glyph** top-left in the device accent,
+- a **name + live value** at the bottom (`6/6 on`, `Charged`, `12 ug/m3`,
+  `3 saved`, `60s sleep`, `Standby`),
+- a **glow border + accent status dot** when the device is active (lights on,
+  purifier on), otherwise a plain border and a dim dot,
+- special badges: the vacuum shows a **battery pill** (`100%`).
+
+**State-reactive bulb**: the LIGHTS glyph glows in the *live* bulb color
+(`aliveR/G/B` from `updateAliveTint()` — amber for warm, icy blue for cool,
+etc.) when lights are on, and mutes when off/offline.
+
+**Per-bulb color grid** (LIGHTS tile): a 2×3 dot grid (`drawBulbGrid()`) shows
+each individual bulb's current color, laid out **column-major** so the positions
+map to the physical layout `I1 I4 / I2 I5 / I3 I6` (order from
+`yeelight_bulb_utils.py`). Colors arrive in the flat status payload as the
+`bulb_rgb` field — one `RRGGBB` per bulb in sorted-name order, dimmed by each
+bulb's brightness; an off bulb is `000000` and renders as an empty ring. The grid
+replaces the single status dot on this tile and refreshes live on SSE updates.
+
+## Buttons & selection
+
+- `softPanel(...)` — the base for every button, card, and status strip.
+- `drawCompactButton(...)` — the small labelled buttons (modes, fans, vacuum
+  secondary row); shows the accent fill/border/text when `active`.
+- Round "key" glyph buttons (BACK, purifier power) are still rounded panels with
+  a centered icon.
+- Selection is always the same language: **accent fill + accent border + accent
+  text**, so the active mode/fan/state is obvious at a glance.
+
+**Scene icons** (MODES page): each scene tile carries a vector glyph — COOL
+snowflake, WARM sun, SUNSET dome-over-horizon, SLEEP moon, LOVE heart, MOVIE film
+— drawn in that mode's representative hue (`modeVibe565()`: COOL blue, WARM amber,
+SUNSET orange, SLEEP violet, LOVE pink, MOVIE purple), so a scene is recognizable
+by shape *and* color, not just its label. All glyphs live in `icons.h`, a shared
+vector-icon library (drawn from GFX primitives, centered on `cx/cy`).
 
 ## Dynamic Island (top-edge tab)
 
 A matte-black tab that **hangs from the top wall**: its top edge is flush with
-`y=0` (the wall "cuts" the top off) and only the **bottom corners are rounded**,
-so it reads as a notch bulging down — drawn per-row in `islandShell()`. It holds
-all ambient info (`drawIsland` / `islandTick`):
+`y=0` and only the **bottom corners are rounded**, so it reads as a notch
+bulging down — drawn per-row in `islandShell()`. It owns all ambient info
+(`drawIsland` / `islandTick`), and there is no separate header bar:
 
 - **Resting content**: the clock on MAIN, the page title on sub-pages (bold).
 - **Connection dot** (left): green = wifi + server stream · yellow = wifi only ·
@@ -66,36 +101,26 @@ all ambient info (`drawIsland` / `islandTick`):
   centre text (errors in red) without touching the shell or dots, then it
   reverts to the clock/title after `TOAST_HOLD_MS`.
 
-The island owns the whole top edge — there is no separate header bar or
-standalone connection icon. The device IP is available under SETUP → INFO.
-Geometry knobs: the `ISL_*` defines.
+The device IP is available under SETUP → INFO. Geometry knobs: the `ISL_*`
+defines.
 
-## Living background
+## Background
 
-`drawBackground()` paints deep navy with a soft, bulb-colored glow at the top
-(behind the island) and a fainter one at the bottom; the middle stays pure navy
-(and is covered by panels). The glow color comes from `updateAliveTint()`, which
-maps the reported light mode to a vibe (warm→amber, cool→icy blue, sunset→orange,
-sleep→violet, love→pink, movie→purple) and uses the live hue/sat on the COLOR
-page. Lights off → a faint, calm glow. The navy base is unchanged — the color is
-only *added* (`bgRowColor`): a hint everywhere, a strong glow from the top
-(behind the island) and a softer one from the bottom, capped so navy stays the
-base. The glass panels also get a subtle bulb-color **cast** in `glassBody()`, so
-the whole UI — not just the gutters — carries the lights' color and feels alive.
-It's a function of row only, so the flat-`COL_BG` erases overlays still use are
-unaffected; only full page draws use the glow.
+`drawBackground()` fills the screen row-by-row with `bgRowColor()` — a subtle
+static **dark-navy top glow fading to black** (a low-alpha `blend565` that is
+strongest behind the island and vanishes toward the bottom). It's a pure
+function of the row, so overlays that need a flat erase use `COL_BG` directly.
 
 ## Layout & touch
 
 Gutters are 5 px and every target is enlarged for the low-sensitivity resistive
-panel (dashboard tiles 100×95, action buttons ≥56 tall, brightness/display bars
-are full pills). Sub-page content starts at `y=46`. `TOUCH_MIN_PRESSURE` is 250.
+panel (dashboard tiles ~94×84, action buttons ≥44 tall, brightness/display bars
+are full pills). Sub-page content starts at `y≈46`. `TOUCH_MIN_PRESSURE` is 250.
 
-**BACK** is a **circular** button in the top-left, deliberately small and set
-*above* the content (with a gap) so a tap on it can't spill into the row below —
-the earlier full-width back bar sat flush against the first row and cross-
-triggered it. `HIT_SLOP` was also dialed back to **8 px**: with big targets and
-5 px gutters, a large slop bled one button's hit-zone into its neighbour.
+**BACK** is a small rounded button in the top-left, set *above* the content
+(with a gap) so a tap on it can't spill into the row below. `HIT_SLOP` is **8 px**:
+with big targets and 5 px gutters, a larger slop bled one button's hit-zone into
+its neighbour.
 
 ## DEVICE info (SETUP → INFO)
 
@@ -123,14 +148,14 @@ PNG. All geometry/text comes from the vendored genuine Adafruit_GFX, so the
 output matches the device. The screen list and layouts live in `pages.h`, shared
 verbatim with the firmware. See `tools/host_preview/README.md`.
 
-## Tuning the frost
+## Tuning the look
 
-All knobs live in `glassBody()` / the `frost*` / `glassEdge()` helpers near the
-top of the sketch:
-
-- `baseA` — resting opacity of the frost (raise for a more solid card).
-- the `sheen` term — strength of the top-edge gradient.
-- `glassTintColor()` — the color the frost tints toward per theme.
-- `glassRing()` ring colors — the dashboard badge accent.
-
-Both light and dark themes are supported; the tint flips automatically.
+- **Palette**: the `UI_*` constants near the top of the sketch (and the light
+  theme in `applyTheme()`).
+- **Panels**: `softPanel()` (corner radius, border/fill) and `uiTint()` (accent
+  blend strength for selected/active fills and borders).
+- **Accents**: `modeAccent()` (per-mode UI accent) and `modeVibe565()` (the
+  scene-icon hue / living bulb tint).
+- **Dashboard**: `drawDashboardTile()` (per-device accent, glyph, value, glow).
+- **Icons**: `icons.h` — the shared vector-icon library (all `icon*()` glyphs).
+  Add new controls' glyphs here rather than inline in the sketch.

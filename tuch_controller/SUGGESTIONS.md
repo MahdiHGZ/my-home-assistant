@@ -41,6 +41,21 @@ probes), and recover automatically (SSE retry 5 s, first snapshot retry 30 s).
 ## 2. Feature roadmap
 
 ### Lighting
+- **More scene modes** (P2): the six modes (`MODE_LABELS` / `MODE_KEYS` /
+  `MODE_MATCH` in `pages.h`) are compiled in. Add high-value scenes — **READING**,
+  **FOCUS**, **CANDLE**, **DAWN** (a slow wake-up ramp), **PARTY** — and, better,
+  serve the list from `/api/capabilities` so modes become data, not code (pairs
+  with capability discovery below). The MODES page already scrolls to a 3×2 grid;
+  a longer list wants paging or a scrollable column.
+- **Mode color swatches** (P3): tint each MODES / quick-mode tile with that
+  mode's representative color (reuse the `updateAliveTint()` vibe map) so a mode
+  is recognizable at a glance instead of by label alone.
+- **Kelvin (white-temperature) strip** (P3): a dedicated warm↔cool CCT bar on
+  LIGHTS/COLOR, distinct from hue — most everyday "just make it warmer/cooler"
+  adjustments aren't a hue pick. Reuse the gradient-bar widget.
+- **Save current as a favorite scene** (P3): long-press a mode slot to store the
+  live color + brightness as a user scene (NVS, or server-side once
+  `/api/panel/scene` exists), recalled with one tap.
 - **Per-bulb targeting page** (P2): I1–I6 grid (names from `/api/capabilities`),
   tap-to-select a subset, then color/brightness apply to `targets`.
 - **Party page** (P3): toggle + pattern prev/next (`party_toggle`,
@@ -73,6 +88,34 @@ probes), and recover automatically (SSE retry 5 s, first snapshot retry 30 s).
 - **Ultra-dim screensaver clock** (⏸): instead of backlight-off, a dim clock
   face that shifts position each minute (burn-in). Kept plain backlight-off for
   now; only revisit for an always-on-display use.
+
+### UI, icons & visual polish
+- **Richer icon set** (P2): the glyphs (`iconBulb`, `iconVacuum`,
+  `iconFanBlades`, `iconGear`, …) are single-color primitives drawn from circles
+  and rects — blocky and inconsistent in weight. Move to a compact **1-bit icon
+  atlas in PROGMEM** (or multi-tone draws) for crisp, uniform glyphs, and scale
+  up the MAIN dashboard badges. Keeps the draw cheap while looking intentional.
+- **Delete the dead `glass*` renderer** (P3): the flat `softPanel` (UI_*) theme
+  is now the design of record (`DESIGN.md` rewritten to match). The old `glass*`
+  primitives (`glassPanel` / `glassBody` / `glassCircle` / `glassRing` /
+  `glassErase`) are bypassed — `drawBtn` calls `drawHtmlButton()` first, which
+  handles every button and returns early — so the glass branch in `drawBtn`
+  (and the `glassErase`-based `drawCardSub` still reached by `refreshDynamic` on
+  MAIN) is unreachable/inconsistent code. Remove it (or fully revive it), and
+  drop the now-unused `COL_CARD*` plumbing, to cut confusion and flash.
+- **State-reactive icons** (P3): the bulb glyph glows in the live bulb color,
+  fan blades animate while the purifier runs, the vacuum shows a sweeping spinner
+  while cleaning, and the brightness sun's rays scale with level — turns static
+  icons into at-a-glance status.
+- **Anti-aliased corners & edges** (P3): rounded-rect borders are hard-stepped;
+  a 1px edge blend (same per-row budget as `glassBody`) would smooth them and
+  reinforce the glass feel.
+- **Typography pass** (P3): pair the bold value font with a lighter label
+  treatment, right-align numeric readouts, add unit formatting (µg/m³, °C), and
+  keep title casing consistent across pages.
+- **Honest control affordances** (P2): when a device is offline its controls
+  should visibly **dim + lock** instead of silently no-op'ing; pressed/holding
+  states need a clearer treatment than today's subtle frost shift.
 
 ### Interaction
 - **Double-tap-to-wake** (P3): require two taps to wake (guards against pocket /
@@ -220,12 +263,16 @@ mostly a matter of *connecting things that already exist*.
 | **P2** | First-run onboarding + Wi-Fi provisioning portal 💡 | §4, §2 |
 | **P2** | Quiet hours / DND for alerts 💡 | §4 + 🌐 |
 | **P2** | Capability discovery + API-version handshake | §2 🌐 |
+| **P2** | More scene modes (+ capability-served list) | §2 🌐 |
+| **P2** | Richer icon set · honest control affordances | §2 |
+| **P3** | Delete the dead `glass*` renderer (flat theme is design of record) | §2 |
 | **P2** | Per-bulb targeting page · Rooms page | §2 |
 | **P2** | Skip full repaint on unchanged re-entry | §3 |
 | **P2** | JSON-contract fixture test · host tests + CI compile | §3 |
+| **P3** | State-reactive icons · Kelvin strip · mode swatches · AA corners · typography | §2 |
 | **P3** | Adaptive home screen · presence wake · trends sparkline 💡 | §4 + 🌐 |
 | **P3** | Date on MAIN · ambient PM2.5 alert · per-tier sleep controls | §2 |
-| **P3** | mDNS · per-panel OTA hostnames · named constants/action table | §2, §3 |
+| **P3** | Save-current-as-favorite scene · mDNS · per-panel OTA · named constants | §2, §3 |
 | ⏸ | Worker watchdog · TU split · piezo · little-endian RGB565 · screensaver | §2, §3 |
 
 The biggest product leverage is in **§4**: the doorbell, Khatoon quick-commands,

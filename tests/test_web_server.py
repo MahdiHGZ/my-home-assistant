@@ -429,6 +429,35 @@ class PanelStatusFlattenTests(unittest.TestCase):
         self.assertEqual(out["moments"], 3)
         self.assertEqual(out["bulbs_total"], 0)
 
+    def test_flatten_bulb_rgb_grid(self):
+        # One CT-white bulb, one full RGB red, one off, one dimmed green, and two
+        # registered names with no live entry -> 6 x "RRGGBB" in sorted order.
+        bulbs = [
+            {"name": "I1", "current_power": "on", "current_color_mode": 2,
+             "current_color_temp": 2700, "current_brightness": 100},
+            {"name": "I2", "current_power": "on", "current_color_mode": 1,
+             "current_rgb": 0xFF0000, "current_brightness": 100},
+            {"name": "I3", "current_power": "off"},
+            {"name": "I4", "current_power": "on", "current_color_mode": 1,
+             "current_rgb": 0x00FF00, "current_brightness": 50},
+        ]
+        snap = {"lights": {"available": True, "bulbs": bulbs,
+                           "registered_names": ["I1", "I2", "I3", "I4", "I5", "I6"],
+                           "state": {}},
+                "vacuum": {}, "purifier": {}, "moments": {}}
+        out = panel.flatten_status(snap, hour=12)
+        groups = [out["bulb_rgb"][i:i + 6] for i in range(0, len(out["bulb_rgb"]), 6)]
+        self.assertEqual(len(groups), 6)              # one per registered name
+        self.assertEqual(groups[1], "FF0000")         # I2 full red
+        self.assertEqual(groups[2], "000000")         # I3 off
+        self.assertEqual(groups[3], "007F00")         # I4 green @ 50%
+        self.assertEqual(groups[4], "000000")         # I5 no live entry
+        self.assertEqual(groups[5], "000000")         # I6 no live entry
+        # I1 is a warm CT white -> reddish, strong red channel, weaker blue.
+        r1, g1, b1 = (int(groups[0][j:j + 2], 16) for j in (0, 2, 4))
+        self.assertEqual(r1, 255)
+        self.assertGreater(r1, b1)
+
 
 class PanelThumbTests(unittest.TestCase):
     """RGB565 rendering of a moment image."""
