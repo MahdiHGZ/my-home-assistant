@@ -87,7 +87,7 @@ class CaptureDurabilityTests(unittest.TestCase):
 
     def test_failed_encode_never_publishes_destination(self):
         destination = tapo.MOMENTS_DIR / "broken.jpg"
-        destination.parent.mkdir()
+        destination.parent.mkdir(exist_ok=True)
         with mock.patch.object(tapo.cv2, "imwrite", return_value=False):
             with self.assertRaises(tapo.TapoError):
                 tapo._atomic_imwrite(destination, np.zeros((1, 1, 3), dtype=np.uint8))

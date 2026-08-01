@@ -868,25 +868,32 @@ class _Handler(BaseHTTPRequestHandler):
     def _read_body(self) -> dict:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
+            self.close_connection = True
             raise _ApiError("Content-Length is required.", status=411)
         try:
             length = int(raw_length)
         except ValueError as exc:
+            self.close_connection = True
             raise _ApiError("Invalid Content-Length.", status=400) from exc
         if length < 0:
+            self.close_connection = True
             raise _ApiError("Invalid Content-Length.", status=400)
         if length > _MAX_JSON_BODY_BYTES:
+            self.close_connection = True
             raise _ApiError("Request body is too large.", status=413)
         if not length:
             return {}
         content_type = self.headers.get_content_type()
         if content_type != "application/json":
+            self.close_connection = True
             raise _ApiError("Content-Type must be application/json.", status=415)
         try:
             raw = self.rfile.read(length)
         except socket.timeout as exc:
+            self.close_connection = True
             raise _ApiError("Request body timed out.", status=408) from exc
         if len(raw) != length:
+            self.close_connection = True
             raise _ApiError("Incomplete request body.", status=400)
         if not raw:
             return {}

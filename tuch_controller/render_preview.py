@@ -41,7 +41,10 @@ def build():
         os.path.join(HOST, "vendor", "Adafruit_GFX", "Adafruit_GFX.cpp"),
     ]
     cmd = [
-        cc, "-std=c++17", "-O1", "-w",
+        cc, "-std=c++17", "-O1", "-Wall", "-Wextra",
+        "-Wno-unused-parameter", "-Wno-unused-variable", "-Wno-unused-function",
+        "-Wno-sign-compare", "-Wno-missing-field-initializers",
+        "-Wno-deprecated-declarations",
         "-DARDUINO=10819",                       # take the "modern" include paths in libs
         "-I", os.path.join(HOST, "shim"),
         "-I", os.path.join(HOST, "vendor", "Adafruit_GFX"),

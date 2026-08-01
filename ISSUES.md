@@ -58,6 +58,7 @@ The recommended implementation order is:
 - **Type:** Bug / physical safety / reliability
 - **Priority:** P0
 - **Confidence:** High
+- **Status:** Fixed (`149e410`)
 - **Affected part:** `web_server`, `tools`
 - **Effort:** Medium
 
@@ -107,6 +108,7 @@ The browser sends a new remote-drive request every 400 ms without waiting for th
 - **Type:** Bug / reliability
 - **Priority:** P1
 - **Confidence:** High (reproduced locally)
+- **Status:** Fixed (`e5f2ace`)
 - **Affected part:** `controller`
 - **Effort:** Medium
 
@@ -161,6 +163,7 @@ The queue is also unbounded. The `qsize() >= 5` check is approximate and separat
 - **Type:** Bug / reliability
 - **Priority:** P1
 - **Confidence:** High (reproduced locally)
+- **Status:** Fixed (`6a13faa`)
 - **Affected part:** `controller`, `tools`
 - **Effort:** Medium
 
@@ -212,6 +215,7 @@ Most multi-bulb helpers catch exceptions inside each worker, log them, and retur
 - **Type:** Performance / reliability
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`2cd9b7b`)
 - **Affected part:** `web_server`
 - **Effort:** Medium
 
@@ -269,6 +273,7 @@ Under pool saturation, the loop can spend up to one timeout per queued future. T
 - **Type:** Bug / reliability / architecture
 - **Priority:** P1
 - **Confidence:** High for the race; Medium for library-specific failure mode
+- **Status:** Fixed (`9606ce3`)
 - **Affected part:** `tools`, `brain`, `controller`
 - **Effort:** Large
 
@@ -322,6 +327,7 @@ The controller docstring promises serialization, but brain tools call the utilit
 - **Type:** Bug / data integrity / cleanup
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`b7c3005`)
 - **Affected part:** `tools`, `web_server`
 - **Effort:** Medium
 
@@ -375,6 +381,7 @@ Retention is also performed as a side effect of `_moment_files()`, a read helper
 - **Type:** Bug / privacy / product behavior
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`c458dbb`)
 - **Affected part:** `brain`, `web_server`
 - **Effort:** Small for stateless behavior; Medium for sessions
 
@@ -423,6 +430,7 @@ Preferred: restore the documented stateless design by removing `_chat_history` f
 - **Type:** Performance / reliability
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`cf5e3d8`)
 - **Affected part:** `controller` (ESP32 touch controller)
 - **Effort:** Large
 
@@ -474,6 +482,7 @@ Alerts are server-triggered, so this freeze can happen without a user choosing t
 - **Type:** Bug / reliability
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`14a723e`)
 - **Affected part:** `controller` (ESP32 touch controller)
 - **Effort:** Small
 
@@ -520,6 +529,7 @@ Alerts are server-triggered, so this freeze can happen without a user choosing t
 - **Type:** Security / reliability / performance
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`916ebcf`)
 - **Affected part:** `web_server`
 - **Effort:** Medium
 
@@ -716,6 +726,7 @@ The common `api()` helper calls `fetch()` without an abort signal. A hung reques
 - **Type:** Tests / necessary feature
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (CI and integration coverage added with this issue)
 - **Affected part:** `tools`, `web_server`, `brain`, `controller`
 - **Effort:** Large
 
@@ -882,6 +893,7 @@ The README contains machine-specific `file:///Users/divar/...` links, which do n
 - **Type:** Bug / API contract / reliability
 - **Priority:** P1
 - **Confidence:** High
+- **Status:** Fixed (`97e46e9`)
 - **Affected part:** `web_server`
 - **Effort:** Small
 
