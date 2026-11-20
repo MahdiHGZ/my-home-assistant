@@ -27,3 +27,4 @@ brain_model/
 # Build artifacts and generated previews
 **/preview/
 tools/host_preview/build/
+/tests/browser/node_modules/

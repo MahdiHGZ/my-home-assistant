@@ -9,6 +9,8 @@ let lastStatus = null;
 const selectedBulbs = new Set();
 const selectedRooms = new Set();
 let polling = false;
+let statusRevision = 0;
+let driveEpoch = null;
 let sseConnected = false;
 let eventSource = null;
 let chatMessagesSent = 0;
@@ -57,7 +59,7 @@ const ICONS = {
 };
 
 function svgFor(name) {
-  const body = ICONS[name];
+  const body = Object.hasOwn(ICONS, name) && ICONS[name];
   if (!body) return "";
   return `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 }
@@ -171,7 +173,8 @@ let lang = localStorage.getItem("coukab-lang") || "en";
 const t = (key) => (I18N[lang] && I18N[lang][key]) || I18N.en[key] || key;
 const trName = (name) => {
   if (name == null) return name;
-  if (lang === "fa") return FA_NAMES[String(name).toLowerCase()] || name;
+  const key = String(name).toLowerCase();
+  if (lang === "fa" && Object.hasOwn(FA_NAMES, key)) return FA_NAMES[key];
   return name;
 };
 
@@ -195,13 +198,39 @@ async function api(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
-  let data = {};
-  try { data = await res.json(); } catch (_) { /* non-JSON */ }
-  if (!res.ok || data.ok === false) {
-    throw new Error(data.error || `Request failed (${res.status})`);
+  const timeout = path.includes("/chat") ? 180000 :
+    path.includes("/camera/capture") ? 100000 : method === "POST" ? 65000 : 16000;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeout);
+  try {
+    const res = await fetch(path, { ...opts, signal: deadline.signal });
+    if (!res.ok && !res.headers.get("Content-Type")?.includes("application/json")) {
+      throw new Error(`Request failed (${res.status})`);
+    }
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || `Request failed (${res.status})`);
+    if (res.status === 202 && data.accepted) return waitForJob(data.job_id);
+    return data;
+  } catch (err) {
+    if (deadline.signal.aborted) throw new Error("Request timed out.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return data;
+}
+
+async function waitForJob(id) {
+  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Invalid action receipt.");
+  const until = Date.now() + 90000;
+  while (Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const { job } = await api("GET", "/api/actions/" + id);
+    if (job.status === "done") return { ok: true };
+    if (job.status === "failed" || job.status === "cancelled") {
+      throw new Error(job.error || "Action failed.");
+    }
+  }
+  throw new Error(`Action ${id} was accepted. Completion is still unconfirmed.`);
 }
 
 let toastTimer = null;
@@ -280,7 +309,8 @@ function buildScenes() {
   (caps.scene_modes || []).forEach((m) => {
     const btn = document.createElement("button");
     btn.className = "pill";
-    btn.innerHTML = svgFor(SCENE_ICONS[m.key] || "sun") + `<span>${trName(m.name)}</span>`;
+    btn.innerHTML = svgFor(SCENE_ICONS[m.key] || "sun");
+    btn.append(element("span", "", trName(m.name)));
     btn.dataset.light = "mode";
     btn.dataset.mode = m.key;
     row.appendChild(btn);
@@ -315,7 +345,7 @@ function buildBulbGrid() {
     const cell = document.createElement("button");
     cell.className = "bulb off";
     cell.dataset.name = name;
-    cell.innerHTML = `<span class="dot"></span><span class="name">${name}</span><span class="meta">—</span>`;
+    cell.append(element("span", "dot"), element("span", "name", name), element("span", "meta", "—"));
     cell.onclick = () => {
       if (selectedBulbs.has(name)) selectedBulbs.delete(name);
       else selectedBulbs.add(name);
@@ -343,7 +373,8 @@ function buildToggleButtons(containerSel, options, dataKey, iconFn) {
     const btn = document.createElement("button");
     btn.className = "pill";
     const ic = iconFn ? iconFn(o) : "";
-    btn.innerHTML = (ic ? svgFor(ic) : "") + `<span>${trName(o.name)}</span>`;
+    btn.innerHTML = ic ? svgFor(ic) : "";
+    btn.append(element("span", "", trName(o.name)));
     btn.dataset[dataKey] = o.value;
     btn.dataset.name = o.name;
     row.appendChild(btn);
@@ -356,7 +387,7 @@ function buildPatternRow() {
   (caps.dance_patterns || []).forEach((name, i) => {
     const btn = document.createElement("button");
     btn.className = "pill";
-    btn.innerHTML = `<span>${trName(name)}</span>`;
+    btn.append(element("span", "", trName(name)));
     btn.dataset.pattern = i;
     btn.dataset.name = name;
     row.appendChild(btn);
@@ -371,7 +402,7 @@ function buildRoomChips(rooms) {
   rooms.forEach((r) => {
     const btn = document.createElement("button");
     btn.className = "pill toggle";
-    btn.innerHTML = `<span>${r.name}</span>`;
+    btn.append(element("span", "", r.name));
     btn.dataset.roomId = r.id;
     btn.onclick = () => {
       if (selectedRooms.has(r.id)) selectedRooms.delete(r.id);
@@ -410,8 +441,17 @@ function setStat(id, line, off) {
   card.classList.toggle("off", !!off);
 }
 
+function element(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
 function metric(k, v) {
-  return `<div class="metric"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  const row = element("div", "metric");
+  row.append(element("span", "k", k), element("span", "v", v));
+  return row;
 }
 
 function renderLights(l) {
@@ -471,7 +511,7 @@ function renderVacuum(v) {
   if (v.suction_level != null) parts.push(metric(t("m_suction"), trName(v.suction_level)));
   if (v.cleaning_area != null) parts.push(metric(t("m_area"), `${v.cleaning_area} m²`));
   if (v.fault) parts.push(metric(t("m_fault"), v.fault));
-  out.innerHTML = parts.join("");
+  out.replaceChildren(...parts);
   setStat("#statVacuum", `${trName(v.status) || "—"} · ${v.battery ?? "?"}%`);
   syncSelectByName($("#vacSuction"), v.suction_level);
   syncSelectByName($("#vacWater"), v.water_state);
@@ -495,7 +535,7 @@ function renderAir(a) {
   if (a.mode != null) parts.push(metric(t("m_mode"), trName(a.mode)));
   if (a.fan_level != null) parts.push(metric(t("m_fan"), trName(a.fan_level)));
   if (a.filter_left_days != null) parts.push(metric(t("m_filter"), `${a.filter_left_days}d`));
-  out.innerHTML = parts.join("");
+  out.replaceChildren(...parts);
   const isOn = a.power === "ON";
   setStat("#statAir", isOn ? `${a.pm25 ?? "?"} PM2.5` : t("off"), !isOn);
 
@@ -511,15 +551,26 @@ function renderAir(a) {
 }
 
 // One image tile: clickable full-view + a download link and hold-to-delete.
+function isMomentPath(src) {
+  return typeof src === "string" && /^\/moments\/[^/\\?#%]+\.(?:jpe?g|png)$/i.test(src)
+    && new URL(src, location.href).pathname.startsWith("/moments/");
+}
+
 function momentTile(src, { large = false } = {}) {
   const fig = document.createElement("figure");
   fig.className = "gallery-item" + (large ? " large" : "");
 
   const link = document.createElement("a");
+  if (!isMomentPath(src)) return fig;
   link.href = src;
   link.target = "_blank";
   link.rel = "noopener";
-  link.innerHTML = `<img src="${src}" alt="moment" loading="lazy" decoding="async" />`;
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = "moment";
+  img.loading = "lazy";
+  img.decoding = "async";
+  link.append(img);
 
   const actions = document.createElement("div");
   actions.className = "img-actions";
@@ -646,12 +697,15 @@ function setLive(ok) {
 async function pollStatus() {
   if (polling) return;
   polling = true;
+  const revision = statusRevision;
   try {
     const s = await api("GET", "/api/status");
+    if (revision !== statusRevision) return;
+    driveEpoch = s.drive_epoch;
     renderAll(s);
     setLive(true);
   } catch (e) {
-    setLive(false);
+    if (revision === statusRevision) setLive(false);
   } finally {
     polling = false;
   }
@@ -665,7 +719,12 @@ function connectEvents() {
   eventSource.addEventListener("status", (e) => {
     sseConnected = true;
     setLive(true);
-    try { renderAll(JSON.parse(e.data)); } catch (_) { /* ignore bad frame */ }
+    try {
+      const snapshot = JSON.parse(e.data);
+      statusRevision++;
+      driveEpoch = snapshot.drive_epoch;
+      renderAll(snapshot);
+    } catch (_) { /* ignore bad frame */ }
   });
   eventSource.onopen = () => { sseConnected = true; setLive(true); };
   eventSource.onerror = () => {
@@ -679,22 +738,23 @@ function connectEvents() {
 
 // --- event wiring ------------------------------------------------------------
 
-// Trailing-edge throttle: at most one call per `ms`, always ends with the
-// latest value (used for live slider drags; respects the bulbs' rate limit).
-function throttle(fn, ms) {
-  let timer = null, lastArgs = null, lastRun = 0;
-  return (...args) => {
-    lastArgs = args;
-    const now = Date.now();
-    if (!timer && now - lastRun >= ms) {
-      lastRun = now;
-      fn(...lastArgs);
-    } else if (!timer) {
-      timer = setTimeout(() => {
-        timer = null;
-        lastRun = Date.now();
-        fn(...lastArgs);
-      }, ms - (now - lastRun));
+// Keep one light write in flight. After a drag, send the latest absolute value.
+function brightnessSender() {
+  let pending = null;
+  let running = false;
+  return async (value) => {
+    pending = { targets: targets(), brightness: value };
+    if (running) return;
+    running = true;
+    try {
+      while (pending) {
+        const body = pending;
+        pending = null;
+        await act("POST", "/api/lights/control", body);
+        await new Promise(resolve => setTimeout(resolve, 350));
+      }
+    } finally {
+      running = false;
     }
   };
 }
@@ -727,11 +787,10 @@ function wireEvents() {
     act("POST", "/api/lights/control", { targets: targets(), power: false }, { btn: e.currentTarget }));
 
   // Brightness: live preview while dragging (throttled), final value on release.
-  const sendBrightness = throttle((v) =>
-    act("POST", "/api/lights/control", { targets: targets(), brightness: v }), 350);
-  $("#brightness").addEventListener("input", (e) => sendBrightness(+e.target.value));
-  $("#brightness").addEventListener("change", (e) =>
-    act("POST", "/api/lights/control", { targets: targets(), brightness: +e.target.value }));
+  const sendBrightness = brightnessSender();
+  for (const ev of ["input", "change"]) {
+    $("#brightness").addEventListener(ev, e => sendBrightness(+e.target.value));
+  }
 
   $("#colorPicker").addEventListener("change", (e) =>
     act("POST", "/api/lights/control", { targets: targets(), color: e.target.value }));
@@ -862,6 +921,7 @@ function wireDpadHold(btn) {
   let loopTimer = null;
   let session = "";
   let seq = 0;
+  let epoch = null;
   let directionInFlight = false;
 
   const newSession = () => {
@@ -870,9 +930,24 @@ function wireDpadHold(btn) {
     }
     return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   };
-  const send = (value) => api("POST", "/api/vacuum/action", {
-    action: "remote", value, session, seq: ++seq,
-  }).catch(() => {});
+  const send = async (value) => {
+    const hold = session;
+    const sequence = ++seq;
+    try {
+      const result = await api("POST", "/api/vacuum/action", {
+        action: "remote", value, session: hold, epoch, seq: sequence,
+      });
+      if (session !== hold || sequence !== seq) return;
+      if (result.epoch) driveEpoch = result.epoch;
+      if (result.ignored && held && value !== 5) {
+        held = false;
+        clearTimeout(loopTimer);
+        btn.classList.remove("driving");
+      }
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  };
 
   const loop = () => {
     if (!held) return;
@@ -887,7 +962,8 @@ function wireDpadHold(btn) {
 
   btn.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    if (held) return;
+    if (held || !driveEpoch) return;
+    epoch = driveEpoch;
     if (navigator.vibrate) navigator.vibrate(10);
     session = newSession();
     seq = 0;
@@ -902,6 +978,7 @@ function wireDpadHold(btn) {
     btn.classList.remove("driving");
     send(5); // stop
   };
+  window.addEventListener("blur", release);
   btn.addEventListener("pointerup", release);
   btn.addEventListener("pointerleave", release);
   btn.addEventListener("pointercancel", release);
@@ -910,7 +987,7 @@ function wireDpadHold(btn) {
 
 async function loadConsumables() {
   const body = $("#maintBody");
-  body.innerHTML = `<span class="hint">${t("loading")}</span>`;
+  body.replaceChildren(element("span", "hint", t("loading")));
   try {
     const c = await api("GET", "/api/vacuum/consumables");
     if (c.available === false) throw new Error(c.error || t("unavailable"));
@@ -921,17 +998,21 @@ async function loadConsumables() {
       ["m_mop_cloth", c.mop_life, c.mop_hours],
       ["m_filter", c.filter_life, c.filter_hours],
     ].filter(([, life]) => life != null);
-    body.innerHTML = rows.map(([key, life, hours]) => {
+    const metrics = rows.map(([key, life, hours]) => {
       const cls = life < 10 ? "bad" : life < 30 ? "warn" : "";
       const hoursTxt = hours != null ? ` · ${hours}${t("m_hours")}` : "";
-      return `<div class="metric maint-metric ${cls}">
-        <span class="k">${t(key)}${hoursTxt}</span>
-        <span class="v">${life}%</span>
-        <span class="bar"><span class="fill ${cls}" style="width:${Math.max(0, Math.min(100, life))}%"></span></span>
-      </div>`;
-    }).join("") || `<span class="hint">${t("unavailable")}</span>`;
+      const row = metric(t(key) + hoursTxt, `${life}%`);
+      row.className = `metric maint-metric ${cls}`;
+      const bar = element("span", "bar");
+      const fill = element("span", `fill ${cls}`);
+      fill.style.width = `${Math.max(0, Math.min(100, Number(life) || 0))}%`;
+      bar.append(fill);
+      row.append(bar);
+      return row;
+    });
+    body.replaceChildren(...(metrics.length ? metrics : [element("span", "hint", t("unavailable"))]));
   } catch (e) {
-    body.innerHTML = `<span class="hint">${t("unavailable")} — ${e.message}</span>`;
+    body.replaceChildren(element("span", "hint", `${t("unavailable")} — ${e.message}`));
     delete $("#maintDetails").dataset.loaded; // allow retry on next open
   }
 }
@@ -952,8 +1033,8 @@ async function capture(flash) {
   btn.disabled = true;
   try {
     const res = await api("POST", "/api/camera/capture", { flash });
-    if (res.image) {
-      $("#momentLatest").innerHTML = `<img src="${res.image}?t=${Date.now()}" alt="capture" />`;
+    if (isMomentPath(res.image)) {
+      $("#momentLatest").replaceChildren(momentTile(res.image, { large: true }));
       $("#momentLatest").dataset.src = "";  // let renderMoments rebuild with overlay actions
     }
     toast(t("captured"), "good");
@@ -1009,24 +1090,35 @@ async function onChat(e) {
 // dim status line; answer tokens stream into the bubble. Falls back to the
 // blocking /api/chat endpoint if streaming isn't available.
 async function streamChat(msg, pending, ticker, log) {
-  let res;
-  try {
-    res = await fetch("/api/chat/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: msg }),
-    });
-  } catch (e) {
-    res = null;
-  }
-  if (!res || !res.ok || !res.body) {
-    clearInterval(ticker);
+  if (typeof ReadableStream === "undefined") {
     const data = await api("POST", "/api/chat", { message: msg });
+    clearInterval(ticker);
     pending.classList.remove("pending");
     pending.textContent = data.reply || "(no response)";
     return;
   }
+  const controller = new AbortController();
+  let timer;
+  const resetDeadline = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), 180000);
+  };
+  resetDeadline();
+  try {
+    const res = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: msg }),
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`Assistant request failed (${res.status})`);
+    await readChatStream(res, pending, ticker, log, resetDeadline);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
+async function readChatStream(res, pending, ticker, log, resetDeadline) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let bufLine = "";
@@ -1050,6 +1142,7 @@ async function streamChat(msg, pending, ticker, log) {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
+    resetDeadline();
     bufLine += decoder.decode(value, { stream: true });
     let nl;
     while ((nl = bufLine.indexOf("\n")) >= 0) {

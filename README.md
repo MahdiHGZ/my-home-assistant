@@ -203,6 +203,15 @@ The web page is then always available at `http://<device-ip>:8080`.
 
 ---
 
+### Manual vacuum drive clients
+
+For a new directional hold, take `drive_epoch` from the latest `/api/status` snapshot.
+Send it as `epoch` together with a unique `session` and increasing integer `seq` on
+each `remote` command for that hold. Keep that original epoch throughout the hold.
+A response with `ignored: true` ends the hold. Use a fresh snapshot or response epoch
+for the next deliberate press. Release sends direction 5 immediately. An unscoped
+direction 5 stops all holds, and the server exits remote mode after five idle seconds.
+
 ## Touch-controller wall panel (Optional)
 
 An ESP32-S3 wall-mounted touch panel can display real-time status and trigger actions on the LAN. The firmware in [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) features an Apple-style **Liquid-Glass** design — frosted translucency, a Dynamic Island notification bar, and an ambient background that responds to active bulb colors (see [tuch_controller/DESIGN.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/DESIGN.md) and [tuch_controller/HARDWARE.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/HARDWARE.md) for wiring and setup).

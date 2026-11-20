@@ -2,7 +2,7 @@
    API and camera images are always network-only. */
 "use strict";
 
-const VERSION = "coukab-v7";
+const VERSION = "coukab-v8";
 const SHELL = ["/", "/static/style.css", "/static/app.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (e) => {

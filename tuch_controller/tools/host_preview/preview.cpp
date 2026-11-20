@@ -9,6 +9,7 @@
 // ============================================================================
 #include <string>
 #include <cstdio>
+#include <cassert>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -87,6 +88,17 @@ static void sampleState() {
 
 int main(int argc, char** argv) {
   std::string out = (argc > 1) ? argv[1] : "preview";
+
+  // Exercise the transfer guards with the same uint32_t clock used on the panel.
+  const auto gen = imageGeneration.load();
+  assert(validImageResponse(200, 80, "application/octet-stream", 80));
+  assert(!validImageResponse(200, 79, "application/octet-stream", 80));
+  assert(!validImageResponse(200, 81, "application/octet-stream", 80));
+  assert(!validImageResponse(200, 80, "application/json", 80));
+  assert(imageTransferActive(gen, UINT32_MAX - 5, 2, 10));
+  assert(!imageTransferActive(gen, UINT32_MAX - 5, 5, 10));
+  invalidateImages();
+  assert(!imageTransferActive(gen, 0, 1, 10));
 
   tft.setRotation(1);   // landscape 320x240 — the firmware does this in setup()
   tft.cp437(true);      // match setup(): degree (0xF8) / micro (0xE6) glyphs
