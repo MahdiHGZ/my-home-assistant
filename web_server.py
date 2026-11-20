@@ -485,7 +485,7 @@ _last_status_lock = threading.Lock()
 _last_status: dict | None = None
 _status_refresh_lock = threading.Lock()
 _status_futures_lock = threading.Lock()
-_status_futures: dict[str, Future] = {}
+_status_futures: dict[str, tuple[int, Future]] = {}
 
 
 def _status_snapshot(snapshot: dict, generated_at: float) -> dict:
@@ -500,7 +500,7 @@ def _status_snapshot(snapshot: dict, generated_at: float) -> dict:
     return result
 
 
-def _device_status_futures() -> dict[str, Future]:
+def _device_status_futures(generation: int) -> dict[str, tuple[int, Future]]:
     readers = {
         "lights": _lights_status,
         "vacuum": _vacuum_status,
@@ -508,9 +508,9 @@ def _device_status_futures() -> dict[str, Future]:
     }
     with _status_futures_lock:
         for key, reader in readers.items():
-            future = _status_futures.get(key)
-            if future is None or future.done():
-                _status_futures[key] = _STATUS_POOL.submit(_safe, reader)
+            previous = _status_futures.get(key)
+            if previous is None or previous[1].done():
+                _status_futures[key] = generation, _STATUS_POOL.submit(_safe, reader)
         return dict(_status_futures)
 
 
@@ -525,10 +525,17 @@ def _build_status(controller) -> dict:
             if not _status_invalidated and _last_status is not None and _last_status_time >= requested_at:
                 return _status_snapshot(_last_status, _last_status_time)
 
-        futures = _device_status_futures()
-        done, _ = wait(set(futures.values()), timeout=_STATUS_TIMEOUT_S)
+        futures = _device_status_futures(generation)
+        done, _ = wait([future for _, future in futures.values()], timeout=_STATUS_TIMEOUT_S)
+        superseded = False
         result: dict = {}
-        for key, future in futures.items():
+        for key, (read_generation, future) in futures.items():
+            if future in done and read_generation != generation:
+                # A previous HTTP deadline expired while this reader was still
+                # running. Its pre-action result cannot make the cache fresh.
+                superseded = True
+                result[key] = {"available": False, "error": "refresh in progress"}
+                continue
             if future not in done:
                 result[key] = {
                     "available": False,
@@ -545,7 +552,9 @@ def _build_status(controller) -> dict:
         with _last_status_lock:
             _last_status = result
             _last_status_time = generated_at
-            _status_invalidated = generation != _status_generation
+            _status_invalidated = superseded or generation != _status_generation
+            if _status_invalidated:
+                _status_dirty.set()
             return _status_snapshot(result, generated_at)
 
 

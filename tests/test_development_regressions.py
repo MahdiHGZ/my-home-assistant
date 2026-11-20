@@ -1,5 +1,6 @@
 """Regression coverage for physical actions, cache invalidation and event delivery."""
 
+from concurrent.futures import Future
 import json
 import queue
 import tempfile
@@ -141,6 +142,20 @@ class NotificationTests(unittest.TestCase):
             refreshed = web._cached_status(c)
             self.assertEqual(refreshed["purifier"]["value"], 2)
             self.assertFalse(refreshed["_meta"]["stale"])
+
+    def test_previous_deadline_cannot_publish_a_pre_action_result_as_fresh(self):
+        previous = Future()
+        previous.set_result({"power": "old"})
+        readers = {key: (10, previous) for key in ("lights", "purifier", "vacuum")}
+        with (
+            mock.patch.object(web, "_last_status", None),
+            mock.patch.object(web, "_status_generation", 11),
+            mock.patch.object(web, "_device_status_futures", return_value=readers),
+        ):
+            snapshot = web._build_status(mock.Mock())
+        self.assertTrue(snapshot["_meta"]["stale"])
+        self.assertFalse(snapshot["purifier"]["available"])
+        self.assertNotIn("power", snapshot["purifier"])
 
     def test_gallery_excludes_temporary_files_during_deletion_and_pruning(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(camera, "MOMENTS_DIR", Path(directory)):
