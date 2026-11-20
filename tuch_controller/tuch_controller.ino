@@ -12,7 +12,8 @@
 // ESP32-S3 + ILI9341 (320x240, landscape) + XPT2046 resistive touch.
 // Arduino IDE sketch; companions: config.h (pins/palette), secrets.h (wifi).
 // Hardware, wiring, server API and troubleshooting: HARDWARE.md.
-// Roadmap and design rationale: SUGGESTIONS.md.
+// See DESIGN.md for the UI design and the panel backlog on GitHub.
+// https://github.com/MahdiHGZ/my-home-assistant/issues?q=is%3Aissue+is%3Aopen+label%3Aarea%3Apanel
 //
 // Pages: MAIN -> LIGHTS (modes/color/brightness), MODES, COLOR (hue+sat),
 //        VACUUM (start/stop/dock/pause/find), AIR (purifier).
@@ -32,7 +33,7 @@
 // actions degrade with honest messages and automatic recovery.
 //
 // ---------------------------------------------------------------------
-// Design notes (full rationale + status: SUGGESTIONS.md §0):
+// Design notes (see DESIGN.md for the UI rationale):
 //   * Worker -> loop handoff is a FreeRTOS result queue (explicit
 //     cross-core ownership; no volatile slots / spin-waits).
 //   * Optimistic UI: power/mode/fan/light-mode commit on the control

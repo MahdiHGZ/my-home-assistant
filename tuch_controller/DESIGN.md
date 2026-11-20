@@ -11,8 +11,8 @@ build steps, server API, and troubleshooting see `HARDWARE.md`.
 > path (the `UI_*` palette). The older `glass*` primitives (`glassPanel`,
 > `glassBody`, `glassCircle`, `glassRing`) are **legacy and currently unused** —
 > `drawBtn()` calls `drawHtmlButton()` first, which handles every button and
-> returns early. See `SUGGESTIONS.md` (§2) for the "revive glass vs. keep flat"
-> decision. This document describes what actually renders.
+> returns early. The remaining cleanup is tracked in the
+> [renderer issue](https://github.com/MahdiHGZ/my-home-assistant/issues/50).
 
 ## The look
 

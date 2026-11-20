@@ -278,7 +278,6 @@ venv/bin/python -m unittest discover -s tests -v
 | [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) | ESP32-S3 wall touch panel firmware (Liquid-Glass design; see `DESIGN.md` / `HARDWARE.md`) |
 | [tuch_controller_utils.py](file:///Users/divar/Coukab/coukab_lan/tuch_controller_utils.py) | Server-side panel helpers: alerts, RGB565 rendering, status flattening, panel discovery |
 | [moments/](file:///Users/divar/Coukab/coukab_lan/moments) | Captured camera photos (moments) and thumbnails |
-| [SUGGESTIONS.md](file:///Users/divar/Coukab/coukab_lan/SUGGESTIONS.md) | Feature suggestions roadmap (Web, Server, Security, Reliability, etc.) |
-| [CAMERA_AI_SUGGESTIONS.md](file:///Users/divar/Coukab/coukab_lan/CAMERA_AI_SUGGESTIONS.md) | Future vision LLM, CV-motion detection, and retention policy suggestions |
+| [GitHub Issues](https://github.com/MahdiHGZ/my-home-assistant/issues) | Project bugs and feature requests, labeled by component and priority |
 | [bulb.json](file:///Users/divar/Coukab/coukab_lan/bulb.json), [.env](file:///Users/divar/Coukab/coukab_lan/.env) | Your device configuration |
 | [coukab-lan.service](file:///Users/divar/Coukab/coukab_lan/coukab-lan.service) | systemd unit |
