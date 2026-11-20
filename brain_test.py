@@ -111,7 +111,7 @@ def _build_tool_parameters(func: Any) -> dict[str, Any]:
     }
 
 
-def _register_module_functions(module: Any, prefix: str) -> list[str]:
+def _register_module_functions(module: Any, prefix: str, adapt=None) -> list[str]:
     registered: list[str] = []
     for name, func in inspect.getmembers(module, inspect.isfunction):
         if func.__module__ != module.__name__:
@@ -130,26 +130,26 @@ def _register_module_functions(module: Any, prefix: str) -> list[str]:
             name=tool_name,
             description=description,
             parameters=_build_tool_parameters(func),
-            handler=func,
+            handler=adapt(prefix, func) if adapt else func,
         )
         registered.append(tool_name)
     return registered
 
 
-def register_all_tools() -> list[str]:
+def register_all_tools(*, adapt=None) -> list[str]:
     """Register every device utility marked as a brain tool. Returns tool names.
 
     Shared by the CLI test harness and the web interface's assistant chat so
     both expose the exact same tool set to the model.
     """
     brain.clear_tools()
-    registered = _register_module_functions(airpurifier, "airpurifier")
-    registered += _register_module_functions(vacuum, "vacuum")
+    registered = _register_module_functions(airpurifier, "airpurifier", adapt)
+    registered += _register_module_functions(vacuum, "vacuum", adapt)
     if yeelight is not None:
-        registered += _register_module_functions(yeelight, "light")
+        registered += _register_module_functions(yeelight, "light", adapt)
     if tapo is not None:
-        registered += _register_module_functions(tapo, "camera")
-    registered += _register_module_functions(panel, "panel")
+        registered += _register_module_functions(tapo, "camera", adapt)
+    registered += _register_module_functions(panel, "panel", adapt)
     return sorted(registered)
 
 

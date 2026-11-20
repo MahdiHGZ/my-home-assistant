@@ -396,6 +396,8 @@ def flatten_status(snapshot: dict, hour: Optional[int] = None) -> dict:
     return {
         "ok": True,
         "hour": hour,
+        "status_age_ms": (snapshot.get("_meta") or {}).get("age_ms", 0),
+        "status_stale": bool((snapshot.get("_meta") or {}).get("stale")),
         "lights_avail": bool(lights.get("available")),
         "bulbs_on": sum(1 for b in bulbs if str(b.get("current_power")) == "on"),
         "bulbs_total": len(bulbs),

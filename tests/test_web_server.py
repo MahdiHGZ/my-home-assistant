@@ -280,6 +280,16 @@ class StrictRequestValidationTests(unittest.TestCase):
                 web_server._vacuum_action({"action": "suction", "value": True})
         set_level.assert_not_called()
 
+    def test_all_light_actions_validate_fields_before_dispatch(self):
+        actions = ("mode", "full_bright", "party_toggle", "party_pattern", "cycle_start",
+                   "cycle_next", "cycle_prev", "brightness_up", "brightness_down",
+                   "all_off", "random_color", "random_each", "undo")
+        controller = RecordingController()
+        for action in actions:
+            with self.subTest(action=action), self.assertRaises(web_server._ApiError):
+                web_server._lights_action(controller, {"action": action, "targets": "I1"})
+        self.assertFalse(controller.calls)
+
     def test_unknown_fields_are_rejected(self):
         controller = RecordingController()
         with self.assertRaises(web_server._ApiError):
@@ -289,7 +299,11 @@ class StrictRequestValidationTests(unittest.TestCase):
 
 class VacuumRemoteOrderingTests(unittest.TestCase):
     def setUp(self):
-        web_server._remote_latest_seq.clear()
+        self.drive = web_server._RemoteDrive()
+        patcher = mock.patch.object(web_server, "_drive", self.drive)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.drive.revoke)
 
     @mock.patch.object(web_server, "notify_status_changed")
     @mock.patch.object(vacuum, "remote_control")
@@ -301,7 +315,7 @@ class VacuumRemoteOrderingTests(unittest.TestCase):
             "action": "remote", "value": 1, "session": "drag-1", "seq": 1,
         })
 
-        self.assertEqual(stop, {"ok": True})
+        self.assertTrue(stop["ok"])
         self.assertTrue(stale["ignored"])
         remote.assert_called_once_with(5)
 
@@ -312,10 +326,34 @@ class VacuumRemoteOrderingTests(unittest.TestCase):
             "action": "remote", "value": 5, "session": "drag-1", "seq": 2,
         })
         web_server._vacuum_action({
-            "action": "remote", "value": 1, "session": "drag-2", "seq": 1,
+            "action": "remote", "value": 1, "session": "drag-2", "seq": 1, "epoch": self.drive.epoch,
         })
 
         self.assertEqual([c.args[0] for c in remote.call_args_list], [5, 1])
+
+    @mock.patch.object(web_server, "notify_status_changed")
+    @mock.patch.object(vacuum, "remote_control")
+    def test_old_hold_cannot_resume_after_takeover_or_standalone_stop(self, remote, _notify):
+        first = dict(action="remote", value=1, session="old", seq=1, epoch=self.drive.epoch)
+        web_server._vacuum_action(first)
+        second = dict(first, session="new", epoch=self.drive.epoch)
+        web_server._vacuum_action(second)
+        self.assertTrue(web_server._vacuum_action(dict(first, seq=2))["ignored"])
+        web_server._vacuum_action({"action": "remote", "value": 5})
+        self.assertTrue(web_server._vacuum_action(dict(second, seq=2))["ignored"])
+        self.assertEqual(remote.call_args_list, [mock.call(1), mock.call(1), mock.call(5)])
+
+    @mock.patch.object(web_server, "notify_status_changed")
+    @mock.patch.object(vacuum, "remote_control")
+    def test_idle_timer_stops_then_exits_and_invalidates_hold(self, remote, _notify):
+        first = dict(action="remote", value=2, session="old", seq=1, epoch=self.drive.epoch)
+        web_server._vacuum_action(first)
+        timer = self.drive.timer
+        timer.cancel()
+        with mock.patch.object(threading, "current_thread", return_value=timer):
+            self.drive.expire(self.drive.epoch)
+        self.assertEqual(remote.call_args_list, [mock.call(2), mock.call(5), mock.call(10)])
+        self.assertTrue(web_server._vacuum_action(dict(first, seq=2))["ignored"])
 
     @mock.patch.object(vacuum, "remote_control")
     def test_remote_sequence_metadata_must_be_complete(self, remote):

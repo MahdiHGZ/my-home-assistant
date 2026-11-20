@@ -268,14 +268,15 @@ def read_state(registered: dict[str, str]) -> dict[str, dict]:
         try:
             bulb = _get_bulb(ip)
             props = bulb.get_properties()
-            state[name] = {
-                "ip": ip,
-                "power": props.get("power", "off"),
-                "bright": int(props.get("bright", 100)),
-                "color_mode": int(props.get("color_mode", 2)),
-                "ct": int(props.get("ct", 6500)),
-                "rgb": int(props.get("rgb", 0)),
-            }
+            if props.get("power") not in {"on", "off"}:
+                raise ValueError("Missing bulb power state")
+            entry = {"ip": ip, "power": props["power"]}
+            if props["power"] == "on":
+                mode = int(props["color_mode"])
+                fields = {1: ("rgb",), 2: ("ct",), 3: ("hue", "sat")}[mode]
+                entry.update(color_mode=mode, bright=int(props["bright"]))
+                entry.update({field: int(props[field]) for field in fields})
+            state[name] = entry
         except Exception as e:
             _invalidate_bulb(ip)
             logger.error("  %s (%s): failed to read state — %s", name, ip, e)
@@ -285,11 +286,13 @@ def read_state(registered: dict[str, str]) -> dict[str, dict]:
     return state
 
 
-def save_state(registered: dict[str, str]) -> None:
+def save_state(registered: dict[str, str]) -> dict[str, dict]:
     """Reads current bulb state and pushes it onto the undo stack."""
     state = read_state(registered)
-    _state_stack.append(state)
+    if state:
+        _state_stack.append(state)
     logger.debug("State saved (%d in history).", len(_state_stack))
+    return state
 
 
 def apply_state(registered: dict[str, str], state: dict[str, dict]) -> None:
@@ -318,7 +321,9 @@ def apply_state(registered: dict[str, str], state: dict[str, dict]) -> None:
                 g = (rgb_val >> 8) & 0xFF
                 b = rgb_val & 0xFF
                 bulb.set_rgb(r, g, b)
-            else:  # color temperature (mode 2) or HSV (mode 3)
+            elif s["color_mode"] == 3:
+                bulb.set_hsv(s["hue"], s["sat"])
+            else:  # color temperature
                 bulb.set_color_temp(s["ct"])
             bulb.set_brightness(s["bright"])
             _persist_default(bulb)
@@ -1118,53 +1123,46 @@ def control_light(
     return legacy
 
 
-def adjust_brightness(registered: dict[str, str], step: int) -> None:
-    """Adjusts brightness of all registered bulbs by a relative step.
+class BrightnessWriteError(BulbBatchError):
+    """Absolute targets were already retried. Replaying the delta is unsafe."""
 
-    When decreasing below the step size, the bulb is turned off.
-    When increasing while off, the bulb is turned on at the step value.
 
-    Args:
-        registered: Bulb name-to-IP mapping.
-        step: Brightness delta (-100 to 100). Positive = brighter.
-    """
-    direction = "up" if step > 0 else "down"
-    logger.info("Adjusting brightness %s by %d%%.", direction, abs(step))
+def adjust_brightness(registered: dict[str, str], step: int, *, snapshot=None) -> None:
+    """Apply the relative step once, including after a partial write failure."""
+    if snapshot is None:
+        snapshot = read_state(registered)
 
-    def _adjust(name: str, ip: str) -> None:
+    def write(name: str, ip: str) -> None:
+        state = snapshot[name]
+        was_off = state["power"] == "off"
+        if was_off and step <= 0:
+            return
+        target = min(100, (0 if was_off else state["bright"]) + step)
         try:
             bulb = _get_bulb(ip)
-            props = bulb.get_properties()
-            is_off = props.get("power") == "off"
-
-            if is_off and step <= 0:
-                logger.debug("  %s (%s): skipped (already off)", name, ip)
-                return
-
-            if is_off and step > 0:
-                bulb.turn_on()
-                bulb.set_brightness(step)
-                _persist_default(bulb)
-                logger.info("  %s (%s): OFF → %d%%", name, ip, step)
-                return
-
-            current = int(props.get("bright", 50))
-            target = current + step
-
             if target <= 0:
                 bulb.turn_off()
-                logger.info("  %s (%s): %d%% → OFF", name, ip, current)
             else:
-                target = min(100, target)
+                if was_off:
+                    bulb.turn_on()
                 bulb.set_brightness(target)
                 _persist_default(bulb)
-                logger.info("  %s (%s): %d%% → %d%%", name, ip, current, target)
-        except Exception as e:
+        except Exception:
             _invalidate_bulb(ip)
-            logger.error("  %s (%s): FAILED — %s", name, ip, e)
             raise
 
-    _for_each_bulb(registered, _adjust)
+    try:
+        _for_each_bulb(registered, write)
+    except BulbBatchError as first:
+        try:
+            update_discover_config()
+            refreshed = load_registered_bulbs()
+            retry = {name: refreshed[name] for name in first.failures}
+            _for_each_bulb(retry, write)
+        except BulbBatchError as last:
+            raise BrightnessWriteError(last.failures) from last
+        except Exception as exc:
+            raise BrightnessWriteError(first.failures) from exc
 
 
 def set_random_color(registered: dict[str, str]) -> None:

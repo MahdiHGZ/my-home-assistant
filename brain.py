@@ -373,11 +373,7 @@ def run_prompt_stream(
         # genuine answers stream live while tool calls stay hidden.
         buf = ""
         mode: str | None = None       # None -> undecided, "tool", "answer"
-        try:
-            stream = llm.create_chat_completion(messages=messages, stream=True, **chat_kwargs)
-        except Exception as exc:  # noqa: BLE001
-            yield {"type": "done", "text": f"(model error: {exc})"}
-            return
+        stream = llm.create_chat_completion(messages=messages, stream=True, **chat_kwargs)
 
         for chunk in stream:
             delta = (chunk["choices"][0].get("delta") or {}).get("content")

@@ -6,6 +6,9 @@ import socket
 import threading
 import time
 import unittest
+from unittest import mock
+
+from action_errors import ActionCancelledError, ActionInProgressError, ActionQueueFullError
 
 import web_server
 
@@ -82,6 +85,56 @@ class HttpIntegrationTests(unittest.TestCase):
         response = sock.recv(1024)
         sock.close()
         self.assertIn(b" 413 ", response)
+
+    def test_capture_preserves_queue_outcomes_and_job_location(self):
+        for exc, expected in ((ActionInProgressError("abc"), 202), (ActionQueueFullError(), 429),
+                              (ActionCancelledError("abc"), 504)):
+            with self.subTest(exc=exc), mock.patch.object(self.controller, "run_action", side_effect=exc):
+                code, body = self.request("POST", "/api/camera/capture", '{"flash":true}',
+                                          {"Content-Type": "application/json"})
+                self.assertEqual(code, expected)
+                if expected == 202:
+                    with mock.patch.object(self.controller, "job_state", return_value={"status": "done"}):
+                        status, job = self.request("GET", json.loads(body)["status_url"])
+                    self.assertEqual(status, 200)
+                    self.assertEqual(json.loads(job)["job"]["status"], "done")
+
+    def test_upstream_details_do_not_leak_through_json_or_stream(self):
+        failure = "private device details"
+        with (
+            mock.patch.object(web_server.tapo, "capture_moment_for_model", side_effect=RuntimeError(failure)),
+            mock.patch.object(web_server, "_resolve_moment", side_effect=web_server._ApiError(failure, 502)),
+            mock.patch.object(web_server, "_chat_available", return_value=True),
+            mock.patch.object(web_server, "_run_chat_stream", side_effect=RuntimeError(failure)),
+        ):
+            for method, path, data in (("GET", "/moments/example.jpg", None),
+                                       ("POST", "/api/camera/capture", "{}"),
+                                       ("POST", "/api/chat/stream", '{"message":"test"}')):
+                with self.subTest(path=path):
+                    status, body = self.request(method, path, data, {"Content-Type": "application/json"})
+                    self.assertEqual(status, 200 if path.endswith("stream") else 502)
+                    self.assertNotIn(failure.encode(), body)
+                    self.assertTrue(json.loads(body)["error_id"])
+
+    def test_stream_admission_reserves_capacity_and_replays_current_alert(self):
+        with (
+            mock.patch.object(web_server, "_MAX_HANDLER_THREADS", 2),
+            mock.patch.object(web_server, "_cached_status", return_value={}),
+            mock.patch.object(web_server.panel, "get_alert", return_value={"id": 17}),
+        ):
+            conn = http.client.HTTPConnection(self.host, self.port, timeout=2)
+            self.addCleanup(conn.close)
+            conn.request("GET", "/api/events")
+            stream = conn.getresponse()
+            self.addCleanup(stream.close)
+            self.assertEqual(stream.status, 200)
+            self.assertEqual(stream.readline(), b"event: status\n")
+            stream.readline()
+            stream.readline()
+            self.assertEqual(stream.readline(), b"event: alert\n")
+            self.assertIn(b"17", stream.readline())
+            self.assertEqual(self.request("GET", "/api/events")[0], 503)
+            self.assertEqual(self.request("GET", "/api/health")[0], 200)
 
     def test_slow_partial_body_is_closed_at_deadline(self):
         original = web_server._CONNECTION_TIMEOUT_S

@@ -51,7 +51,10 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable
+
+from action_errors import ActionCancelledError, ActionInProgressError, ActionQueueFullError
 
 try:
     import evdev
@@ -74,25 +77,6 @@ _FLASH_BLINK_OFF_S = 0.2
 _ACTION_QUEUE_SIZE = 5
 _JOB_HISTORY_SIZE = 100
 
-
-class ActionQueueFullError(Exception):
-    """The bounded controller queue cannot accept another action."""
-
-
-class ActionCancelledError(TimeoutError):
-    """An action timed out while queued and was cancelled before execution."""
-
-    def __init__(self, job_id: str) -> None:
-        self.job_id = job_id
-        super().__init__(f"Action {job_id} timed out and was cancelled before execution.")
-
-
-class ActionInProgressError(TimeoutError):
-    """The caller deadline expired after device I/O had already started."""
-
-    def __init__(self, job_id: str) -> None:
-        self.job_id = job_id
-        super().__init__(f"Action {job_id} is still running.")
 
 # ---------------------------------------------------------------------------
 # Data-driven key → mode mappings.
@@ -187,6 +171,8 @@ def retry_with_discovery(max_attempts=3):
             for attempt in range(1, max_attempts + 1):
                 try:
                     return fn(*args, **kwargs)
+                except yeelight_bulb_utils.BrightnessWriteError:
+                    raise
                 except Exception:
                     logger.exception(
                         "%s failed (attempt %d/%d).", fn.__name__, attempt, max_attempts
@@ -314,7 +300,8 @@ class Controller:
                     phase = "failed" if "error" in box else "done"
                 update: dict[str, object] = {"status": phase, "finished_at": time.time()}
                 if "error" in box:
-                    update["error"] = str(box["error"])
+                    logger.error("Action %s failed: %s", job_id, box["error"])
+                    update["error"] = "Device action failed."
                 self._record_job(job_id, **update)
                 done.set()
 
@@ -348,6 +335,8 @@ class Controller:
         for attempt in range(1, max_attempts + 1):
             try:
                 return fn(*args, **kwargs)
+            except yeelight_bulb_utils.BrightnessWriteError:
+                raise
             except Exception:
                 logger.exception("%s failed (attempt %d/%d).", getattr(fn, "__name__", fn), attempt, max_attempts)
                 if attempt == max_attempts:
@@ -426,8 +415,8 @@ class Controller:
         if yeelight_bulb_utils.is_party_running():
             yeelight_bulb_utils.stop_party_dance()
         logger.info("Brightness step %+d.", step)
-        yeelight_bulb_utils.save_state(bulbs)
-        yeelight_bulb_utils.adjust_brightness(bulbs, step)
+        snapshot = yeelight_bulb_utils.save_state(bulbs)
+        yeelight_bulb_utils.adjust_brightness(bulbs, step, snapshot=snapshot)
 
     def _do_all_off(self) -> None:
         bulbs = yeelight_bulb_utils.load_registered_bulbs()

@@ -14,6 +14,8 @@ Design notes:
 
 from __future__ import annotations
 
+from functools import wraps
+
 import hmac
 import json
 import logging
@@ -30,6 +32,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from action_errors import ActionCancelledError, ActionInProgressError, ActionQueueFullError
 import tapo_camera_utils as tapo
 import tuch_controller_utils as panel
 import xiaomi_airpurifier_utils as purifier
@@ -67,8 +70,77 @@ _MAX_HANDLER_THREADS = 32
 # carry a browser-session sequence: once STOP(N) is seen, any delayed direction
 # with a sequence <= N is discarded instead of restarting physical movement.
 _vacuum_action_lock = threading.Lock()
-_remote_latest_seq: dict[str, int] = {}
-_REMOTE_SESSION_LIMIT = 64
+
+
+class _RemoteDrive:
+    """All transitions and device writes are serialized by _vacuum_action_lock."""
+
+    def __init__(self):
+        self.epoch = uuid.uuid4().hex
+        self.owner = None
+        self.seq = 0
+        self.timer = None
+
+    def revoke(self):
+        if self.timer:
+            self.timer.cancel()
+            self.timer = None
+        self.owner = None
+        self.seq = 0
+        self.epoch = uuid.uuid4().hex
+
+    def expire(self, epoch):
+        with _vacuum_action_lock:
+            if self.epoch != epoch or threading.current_thread() is not self.timer:
+                return
+            was_driving = self.owner is not None
+            self.revoke()
+            try:
+                if was_driving:
+                    vacuum.remote_control(5)
+            finally:
+                try:
+                    vacuum.remote_control(10)
+                finally:
+                    notify_status_changed()
+
+    def arm_timeout(self):
+        if self.timer:
+            self.timer.cancel()
+        self.timer = threading.Timer(5, self.expire, args=(self.epoch,))
+        self.timer.daemon = True
+        self.timer.start()
+
+    def command(self, body):
+        direction = _int_field(body, "value", allowed={1, 2, 3, 4, 5, 10})
+        session = _string_field(body, "session", required=False)
+        seq = _int_field(body, "seq", required=False, minimum=1)
+        epoch = _string_field(body, "epoch", required=False)
+        if (session is None) != (seq is None):
+            raise _ApiError("Remote control requires both session and seq.")
+        stop = direction in {5, 10}
+        if not stop and not session:
+            raise _ApiError("Movement requires a sequenced drive session.")
+        if session is not None and session != self.owner:
+            # A hold may claim the current epoch once. A release can arrive
+            # before its first direction and must retire that same epoch.
+            if epoch != self.epoch and not (stop and epoch is None):
+                return {"ok": True, "ignored": True, "epoch": self.epoch}
+            self.revoke()
+            self.owner = session
+        if session is not None and seq <= self.seq:
+            return {"ok": True, "ignored": True, "epoch": self.epoch}
+        self.seq = seq or 0
+        if stop:
+            self.revoke()
+        if direction != 10:
+            self.arm_timeout()
+        vacuum.remote_control(direction)
+        notify_status_changed()
+        return {"ok": True, "epoch": self.epoch}
+
+
+_drive = _RemoteDrive()
 
 _STATIC_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -100,7 +172,28 @@ _ROOT_STATIC = {
 _SSE_HEARTBEAT_S = 15
 _SSE_DEBOUNCE_S = 0.3
 
-_sse_clients: set[queue.Queue] = set()
+
+class _EventMailbox:
+    """One pending notification per event type for each subscriber."""
+
+    def __init__(self):
+        self._ready = threading.Condition()
+        self._events = {}
+
+    def put(self, event, payload):
+        with self._ready:
+            self._events[event] = payload
+            self._ready.notify()
+
+    def get(self, timeout):
+        with self._ready:
+            if not self._ready.wait_for(lambda: bool(self._events), timeout):
+                raise queue.Empty
+            event = next(iter(self._events))
+            return event, self._events.pop(event)
+
+
+_sse_clients: set[_EventMailbox] = set()
 _sse_lock = threading.Lock()
 _status_dirty = threading.Event()
 _controller_ref = None  # set by start()
@@ -108,12 +201,14 @@ _controller_ref = None  # set by start()
 _STATUS_CACHE_TTL_S = 3.0
 _last_status_time = 0.0
 _status_invalidated = True
+_status_generation = 0
 
 
 def notify_status_changed() -> None:
     """Schedules a status push to all connected SSE clients and invalidates cache."""
-    global _status_invalidated
+    global _status_invalidated, _status_generation
     with _last_status_lock:
+        _status_generation += 1
         _status_invalidated = True
     _status_dirty.set()
 
@@ -121,12 +216,8 @@ def notify_status_changed() -> None:
 def _sse_broadcast(event: str, payload: str) -> None:
     """Queues one named SSE event for every connected client."""
     with _sse_lock:
-        clients = list(_sse_clients)
-    for q in clients:
-        try:
-            q.put_nowait((event, payload))
-        except queue.Full:
-            pass  # client is backed up; it will catch up on the next push
+        for client in _sse_clients:
+            client.put(event, payload)
 
 
 def _notifier_loop() -> None:
@@ -134,9 +225,7 @@ def _notifier_loop() -> None:
         _status_dirty.wait()
         time.sleep(_SSE_DEBOUNCE_S)  # coalesce action bursts into one snapshot
         _status_dirty.clear()
-        with _sse_lock:
-            has_clients = bool(_sse_clients)
-        if not has_clients or _controller_ref is None:
+        if _controller_ref is None:
             continue
         try:
             payload = json.dumps(_cached_status(_controller_ref))
@@ -166,6 +255,37 @@ def _chat_available() -> bool:
     return Path(brain.DEFAULT_MODEL_PATH).exists()
 
 
+def _assistant_handler(prefix, func):
+    """Coordinate web assistant mutations with other physical controls."""
+    if func.__name__.startswith("get_") or func.__name__ == "look_around" or prefix == "panel":
+        return func
+
+    @wraps(func)
+    def invoke(**kwargs):
+        if prefix == "light":
+            if all(kwargs.get(key) is None for key in ("power", "brightness", "color")):
+                return func(**kwargs)
+
+            def change_light():
+                if yeelight.is_party_running():
+                    yeelight.stop_party_dance()
+                return func(**kwargs)
+
+            return _controller_ref.run_action(change_light)
+
+        try:
+            if prefix == "vacuum":
+                with _vacuum_action_lock:
+                    if func.__name__.startswith("start") or func.__name__ in {"stop", "pause", "return_dock"}:
+                        _drive.revoke()
+                    return func(**kwargs)
+            return func(**kwargs)
+        finally:
+            notify_status_changed()
+
+    return invoke
+
+
 def _ensure_chat_ready():
     """Lazily load the model + register tools once; returns the brain module."""
     global _chat_ready
@@ -174,7 +294,7 @@ def _ensure_chat_ready():
     if not _chat_ready:
         logger.info("Loading assistant model (first chat request)…")
         brain.load_model()
-        brain_test.register_all_tools()
+        brain_test.register_all_tools(adapt=_assistant_handler)
         _chat_ready = True
     return brain
 
@@ -308,11 +428,12 @@ def _moment_files() -> list[Path]:
     moments_dir = Path(tapo.MOMENTS_DIR).resolve()
     if not moments_dir.is_dir():
         return []
-    files = [
-        p for p in moments_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
-    ]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    with tapo.moments_lock:
+        files = [
+            p for p in moments_dir.iterdir()
+            if not p.name.startswith(".") and p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        ]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     
     return files
 
@@ -347,11 +468,12 @@ def _resolve_moment(name: str, thumb: bool = False) -> Path:
 
 def _delete_moment(name: str) -> None:
     """Deletes one captured image (validated by :func:`_resolve_moment`)."""
-    path = _resolve_moment(name)
-    path.unlink()
-    thumb_path = path.parent / ".thumbs" / path.name
-    if thumb_path.exists():
-        thumb_path.unlink()
+    with tapo.moments_lock:
+        path = _resolve_moment(name)
+        path.unlink()
+        thumb_path = path.parent / ".thumbs" / path.name
+        if thumb_path.exists():
+            thumb_path.unlink()
     logger.info("Moment deleted via web: %s", path.name)
 
 
@@ -370,9 +492,10 @@ def _status_snapshot(snapshot: dict, generated_at: float) -> dict:
     """Return a copy annotated with cache age without mutating the cache."""
     age = max(0.0, time.monotonic() - generated_at)
     result = dict(snapshot)
+    result["drive_epoch"] = _drive.epoch
     result["_meta"] = {
         "age_ms": round(age * 1000),
-        "stale": age >= _STATUS_CACHE_TTL_S,
+        "stale": _status_invalidated or age >= _STATUS_CACHE_TTL_S,
     }
     return result
 
@@ -398,7 +521,8 @@ def _build_status(controller) -> dict:
         # A concurrent builder may already have produced the snapshot this
         # caller needed; reuse it instead of immediately polling again.
         with _last_status_lock:
-            if _last_status is not None and _last_status_time >= requested_at:
+            generation = _status_generation
+            if not _status_invalidated and _last_status is not None and _last_status_time >= requested_at:
                 return _status_snapshot(_last_status, _last_status_time)
 
         futures = _device_status_futures()
@@ -421,8 +545,8 @@ def _build_status(controller) -> dict:
         with _last_status_lock:
             _last_status = result
             _last_status_time = generated_at
-            _status_invalidated = False
-        return _status_snapshot(result, generated_at)
+            _status_invalidated = generation != _status_generation
+            return _status_snapshot(result, generated_at)
 
 
 def _cached_status(controller) -> dict:
@@ -450,7 +574,7 @@ def _panel_cached_status(controller) -> dict:
     now = time.monotonic()
     with _last_status_lock:
         if _last_status is not None:
-            if (now - _last_status_time) >= _STATUS_CACHE_TTL_S:
+            if _status_invalidated or (now - _last_status_time) >= _STATUS_CACHE_TTL_S:
                 _status_dirty.set()
             return _status_snapshot(_last_status, _last_status_time)
     return _build_status(controller)
@@ -617,6 +741,8 @@ def _int_field(
 def _lights_action(controller, body: dict) -> dict:
     action = _string_field(body, "action")
     c = controller
+    if action not in {"mode", "party_pattern"}:
+        _reject_unknown(body, {"action"})
     if action == "mode":
         _reject_unknown(body, {"action", "mode"})
         key = _string_field(body, "mode")
@@ -650,8 +776,6 @@ def _lights_action(controller, body: dict) -> dict:
         c.run_action(c._do_undo)
     else:
         raise _ApiError(f"Unknown light action '{action}'.")
-    if action not in {"mode", "party_pattern"}:
-        _reject_unknown(body, {"action"})
     return {"ok": True, "state": c.state()}
 
 
@@ -686,11 +810,13 @@ def _vacuum_action(body: dict) -> dict:
     if action in no_value_actions:
         _reject_unknown(body, {"action"})
     elif action == "remote":
-        _reject_unknown(body, {"action", "value", "session", "seq"})
+        _reject_unknown(body, {"action", "value", "session", "seq", "epoch"})
     else:
         _reject_unknown(body, {"action", "value"})
     try:
         with _vacuum_action_lock:
+            if action in {"sweep", "mop", "sweep_mop", "stop", "pause", "dock"}:
+                _drive.revoke()
             if action == "sweep":
                 vacuum.start_sweep()
             elif action == "mop":
@@ -715,26 +841,10 @@ def _vacuum_action(body: dict) -> dict:
                 value = body.get("value")
                 if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).strip():
                     raise _ApiError("'value' must be a room identifier.")
+                _drive.revoke()
                 vacuum.start_room_sweep(str(value))
             elif action == "remote":
-                direction = _int_field(body, "value", allowed={1, 2, 3, 4, 5, 10})
-                session = body.get("session")
-                seq = body.get("seq")
-                if session is not None or seq is not None:
-                    if not isinstance(session, str) or not session.strip():
-                        raise _ApiError("Remote control requires a non-empty 'session'.")
-                    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
-                        raise _ApiError("Remote control requires a positive integer 'seq'.")
-                    session = session[:80]
-                    latest = _remote_latest_seq.get(session, 0)
-                    if seq <= latest:
-                        return {"ok": True, "ignored": True, "reason": "stale remote command"}
-                    if session not in _remote_latest_seq and len(_remote_latest_seq) >= _REMOTE_SESSION_LIMIT:
-                        _remote_latest_seq.pop(next(iter(_remote_latest_seq)))
-                    # Record intent before I/O. If STOP fails, older movement
-                    # still must not be allowed to run afterward.
-                    _remote_latest_seq[session] = seq
-                vacuum.remote_control(direction)
+                return _drive.command(body)
             else:
                 raise _ApiError(f"Unknown vacuum action '{action}'.")
     except _ApiError:
@@ -796,6 +906,8 @@ def _camera_capture(controller, body: dict) -> dict:
         else:
             result = tapo.capture_moment_for_model(include_data_uri=False)
             captured = result["image_path"]
+    except (ActionCancelledError, ActionInProgressError, ActionQueueFullError):
+        raise
     except Exception as e:
         raise _ApiError(f"Capture failed: {e}", status=502) from e
     image_path = Path(captured)
@@ -979,12 +1091,12 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             for event in _run_chat_stream(message):
                 write(event)
-        except (BrokenPipeError, ConnectionResetError, OSError):
+        except (BrokenPipeError, ConnectionResetError):
             return  # client navigated away mid-reply
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Chat stream failed")
+        except Exception:
+            failure = self._public_failure("Assistant failed.")
             try:
-                write({"type": "error", "text": str(e)})
+                write({"type": "error", "text": failure["error"], "error_id": failure["error_id"]})
             except OSError:
                 pass
 
@@ -993,9 +1105,18 @@ class _Handler(BaseHTTPRequestHandler):
         # The firmware tags its request so we can learn the panel's LAN IP.
         if self.headers.get("X-Coukab-Panel"):
             panel.register_panel(self.client_address[0])
-        client: queue.Queue = queue.Queue(maxsize=4)
+        client = _EventMailbox()
         with _sse_lock:
-            _sse_clients.add(client)
+            admitted = len(_sse_clients) < max(1, _MAX_HANDLER_THREADS // 2)
+            if admitted:
+                _sse_clients.add(client)
+                latest = panel.get_alert()
+                if latest.get("id"):
+                    client.put("alert", json.dumps({"id": latest["id"]}))
+        if not admitted:
+            self.close_connection = True
+            self._send_json({"ok": False, "error": "Event streams are busy."}, status=503)
+            return
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1022,21 +1143,10 @@ class _Handler(BaseHTTPRequestHandler):
                 _sse_clients.discard(client)
 
     def _serve_moment(self, filename: str, *, download: bool = False, thumb: bool = False) -> None:
-        try:
+        with tapo.moments_lock:
             path = _resolve_moment(filename, thumb=thumb)
-        except _ApiError as e:
-            if e.status >= 500:
-                error_id = uuid.uuid4().hex[:12]
-                logger.error("GET %s upstream failure [error_id=%s]: %s", path, error_id, e)
-                self._send_json(
-                    {"ok": False, "error": "Upstream service failed.", "error_id": error_id},
-                    status=e.status,
-                )
-            else:
-                self._send_json({"ok": False, "error": str(e)}, status=e.status)
-            return
-        content_type = _STATIC_TYPES.get(path.suffix.lower(), "application/octet-stream")
-        data = path.read_bytes()
+            content_type = _STATIC_TYPES.get(path.suffix.lower(), "application/octet-stream")
+            data = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -1098,23 +1208,20 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_bytes(b"", "image/x-icon", status=204)
             else:
                 self._send_json({"error": "Not found."}, status=404)
-        except _ApiError as e:
-            if e.status >= 500:
-                error_id = uuid.uuid4().hex[:12]
-                logger.error("POST %s upstream failure [error_id=%s]: %s", path, error_id, e)
-                self._send_json(
-                    {"ok": False, "error": "Upstream service failed.", "error_id": error_id},
-                    status=e.status,
-                )
-            else:
-                self._send_json({"ok": False, "error": str(e)}, status=e.status)
-        except Exception as e:  # noqa: BLE001
-            error_id = uuid.uuid4().hex[:12]
-            logger.exception("GET %s failed [error_id=%s]", path, error_id)
-            self._send_json(
-                {"ok": False, "error": "Internal server error.", "error_id": error_id},
-                status=500,
-            )
+        except _ApiError as exc:
+            self._send_api_error(exc)
+        except Exception:
+            self._send_json(self._public_failure("Internal server error."), status=500)
+
+    def _public_failure(self, message):
+        error_id = uuid.uuid4().hex[:12]
+        logger.exception("%s %s failed [%s]", self.command, self.path.split("?")[0], error_id)
+        return {"ok": False, "error": message, "error_id": error_id}
+
+    def _send_api_error(self, exc):
+        payload = (self._public_failure("Upstream service failed.") if exc.status >= 500
+                   else {"ok": False, "error": str(exc)})
+        self._send_json(payload, status=exc.status)
 
     def do_POST(self) -> None:  # noqa: N802 - base API
         path = self.path.split("?", 1)[0]
@@ -1140,41 +1247,21 @@ class _Handler(BaseHTTPRequestHandler):
                 self._serve_chat_stream(body)
             else:
                 self._send_json({"error": "Not found."}, status=404)
-        except _ApiError as e:
-            self._send_json({"ok": False, "error": str(e)}, status=e.status)
-        except Exception as e:  # noqa: BLE001
-            error_id = uuid.uuid4().hex[:12]
-            logger.exception("POST %s failed [error_id=%s]", path, error_id)
-            if e.__class__.__name__ in {"QueueFullError", "ActionQueueFullError"}:
-                self._send_json({"ok": False, "error": "Too many requests. Please try again."}, status=429)
-            elif e.__class__.__name__ == "ActionInProgressError":
-                self._send_json(
-                    {
-                        "ok": True,
-                        "accepted": True,
-                        "job_id": e.job_id,
-                        "status_url": f"/api/actions/{e.job_id}",
-                    },
-                    status=202,
-                )
-            elif isinstance(e, TimeoutError):
-                self._send_json(
-                    {"ok": False, "error": "Action timed out.", "error_id": error_id},
-                    status=504,
-                )
-            elif isinstance(e, yeelight.BulbBatchError):
-                payload = {
-                    "ok": False,
-                    "error": "One or more bulbs failed.",
-                    "error_id": error_id,
-                    "failed_bulbs": sorted(e.failures),
-                }
-                self._send_json(payload, status=502)
-            else:
-                self._send_json(
-                    {"ok": False, "error": "Internal server error.", "error_id": error_id},
-                    status=500,
-                )
+        except _ApiError as exc:
+            self._send_api_error(exc)
+        except ActionQueueFullError:
+            self._send_json({"ok": False, "error": "Too many pending actions."}, status=429)
+        except ActionInProgressError as exc:
+            self._send_json({"ok": True, "accepted": True, "job_id": exc.job_id,
+                             "status_url": f"/api/actions/{exc.job_id}"}, status=202)
+        except TimeoutError:
+            self._send_json(self._public_failure("Action timed out."), status=504)
+        except yeelight.BulbBatchError as exc:
+            payload = self._public_failure("One or more bulbs failed.")
+            payload["failed_bulbs"] = sorted(exc.failures)
+            self._send_json(payload, status=502)
+        except Exception:
+            self._send_json(self._public_failure("Internal server error."), status=500)
 
 
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):

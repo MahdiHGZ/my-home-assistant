@@ -40,7 +40,7 @@ _TAPO_PASSWORD = os.getenv("TAPO_PASSWORD", "")
 _TAPO_CLOUD_PASSWORD = os.getenv("TAPO_CLOUD_PASSWORD", "")
 
 MOMENTS_DIR = Path("moments")
-_moment_lock = threading.Lock()
+moments_lock = threading.Lock()
 _MAX_MOMENTS = 50
 
 _PRIVACY_DISABLE_WAIT_S = 3
@@ -196,7 +196,7 @@ def capture_moment(cap: cv2.VideoCapture) -> Path | None:
     if not ret:
         logger.error("Failed to read frame from camera.")
         return None
-    with _moment_lock:
+    with moments_lock:
         MOMENTS_DIR.mkdir(parents=True, exist_ok=True)
         (MOMENTS_DIR / ".thumbs").mkdir(exist_ok=True)
         filename = (
