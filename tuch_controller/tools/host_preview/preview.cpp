@@ -29,6 +29,7 @@ void loadConfig();
 void saveConfig();
 
 // Pull in the entire firmware (drawing code, state, globals, the `tft` object).
+#define COUKAB_HOST_PREVIEW
 #include "../../tuch_controller.ino"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION

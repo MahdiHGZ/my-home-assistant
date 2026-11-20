@@ -52,6 +52,7 @@
 //   worker watchdog (conflicts with the 60 s capture POST), piezo (hardware).
 // =====================================================================
 
+#include <atomic>
 #include <Arduino.h>
 #include <SPI.h>
 #include <WiFi.h>
@@ -67,7 +68,11 @@
 #include <driver/gpio.h>
 
 #include "config.h"
+#ifdef COUKAB_HOST_PREVIEW
+#include "secrets.h.example"
+#else
 #include "secrets.h"
+#endif
 
 SPIClass tftSPI(FSPI);
 
@@ -325,7 +330,10 @@ bool nightEnabled = true;
 #define JOB_ALERT_IMAGE  3
 #define JOB_MOMENT_IMAGE 4
 
+std::atomic<uint32_t> imageGeneration{0};
+
 struct ApiJob {
+  uint32_t generation;
   uint8_t type;
   uint32_t timeoutMs;  // 0 = default HTTP_TIMEOUT_MS
   char path[40];
@@ -340,9 +348,10 @@ struct ApiJob {
 #define RES_ALERT_IMAGE  3
 #define RES_MOMENT_IMAGE 4
 struct ApiResult {
+  uint32_t generation;
   uint8_t type;
   bool ok;
-  char text[384];   // flat panel status is ~250 B; margin against truncation
+  char text[640];   // flat panel status is ~250 B; margin against truncation
 };
 
 QueueHandle_t apiQueue = nullptr;
@@ -1870,7 +1879,13 @@ void refreshDynamic() {
   }
 }
 
+void invalidateImages() {
+  ++imageGeneration;
+  alertImagePending = false;
+}
+
 void showPage(Page p) {
+  invalidateImages();
   currentPage = p;
   lastPressed = -1;
   lastRawHit = -2;
@@ -1980,6 +1995,7 @@ void updateBacklight() {
   unsigned long idle = millis() - lastActivityMs;
   if (idle >= offAfterMs) {
     if (screenOn) {
+      invalidateImages();
       screenOn = false;
       screenOffSince = millis();   // start of the light-sleep window
       setBacklight(BL_OFF);
@@ -2136,7 +2152,17 @@ String httpGetJson(const char* path, uint32_t timeoutMs) {
   return out;
 }
 
-bool httpGetBinary(const char* path, uint8_t* out, size_t expected, uint32_t timeoutMs) {
+bool validImageResponse(int code, int length, const String& type, size_t expected) {
+  return code == 200 && length == (int)expected && type == "application/octet-stream";
+}
+
+bool imageTransferActive(uint32_t generation, uint32_t start, uint32_t now, uint32_t timeout) {
+  return generation == imageGeneration.load() && (uint32_t)(now - start) < timeout;
+}
+
+bool httpGetBinary(const char* path, uint8_t* out, size_t expected, uint32_t timeoutMs, uint32_t generation) {
+  uint32_t start = millis();
+  if (generation != imageGeneration.load()) return false;
   if (!out || (ENABLE_WIFI && WiFi.status() != WL_CONNECTED)) return false;
   WiFiClient client;
   HTTPClient http;
@@ -2144,15 +2170,18 @@ bool httpGetBinary(const char* path, uint8_t* out, size_t expected, uint32_t tim
   if (!http.begin(client, url)) return false;
   http.setTimeout(timeoutMs);
   http.setConnectTimeout(serverReachable ? HTTP_TIMEOUT_MS : 2500);
-  if (http.GET() != 200) {
+  const char* headers[] = {"Content-Type"};
+  http.collectHeaders(headers, 1);
+  int code = http.GET();
+  if (!validImageResponse(code, http.getSize(), http.header("Content-Type"), expected)) {
     http.end();
     return false;
   }
 
   WiFiClient* stream = http.getStreamPtr();
   size_t received = 0;
-  unsigned long deadline = millis() + timeoutMs;
-  while (received < expected && millis() < deadline) {
+  while (received < expected && imageTransferActive(generation, start, millis(), timeoutMs)) {
+    if (!stream->available() && !http.connected()) break;
     int count = stream->read(out + received, expected - received);
     if (count > 0) received += (size_t)count;
     else delay(2);
@@ -2164,8 +2193,9 @@ bool httpGetBinary(const char* path, uint8_t* out, size_t expected, uint32_t tim
 // Hand one finished result to loop() over the result queue. Blocks the worker
 // only if loop() is briefly behind (queue full) — bounded, and far cleaner
 // than the old volatile-slot spin-waits.
-static void pushResult(uint8_t type, bool ok, const char* text) {
+static void pushResult(uint8_t type, bool ok, const char* text, uint32_t generation) {
   ApiResult res;
+  res.generation = generation;
   res.type = type;
   res.ok = ok;
   strlcpy(res.text, text ? text : "", sizeof(res.text));
@@ -2191,21 +2221,21 @@ void apiWorkerTask(void* arg) {
         else if (code == -1)  msg = "no wifi";
         else                  msg = "server unreachable";
       }
-      pushResult(RES_TOAST, ok, msg);
+      pushResult(RES_TOAST, ok, msg, 0);
     } else if (job.type == JOB_STATUS) {  // always deliver so loop() clears its dedupe flag
       String payload = httpGetJson("/api/panel/status", STATUS_TIMEOUT_MS);
       if (payload.length()) serverReachable = true;
       else if (WiFi.status() == WL_CONNECTED) serverReachable = false;
-      pushResult(RES_STATUS, payload.length() > 0, payload.length() ? payload.c_str() : "{}");
+      pushResult(RES_STATUS, payload.length() > 0, payload.length() ? payload.c_str() : "{}", 0);
     } else if (job.type == JOB_ALERT) {  // fetch alert metadata (id) for dedupe
       String payload = httpGetJson("/api/panel/alert", HTTP_TIMEOUT_MS);
       if (payload.length()) serverReachable = true;
-      pushResult(RES_ALERT, payload.length() > 0, payload.length() ? payload.c_str() : "{}");
+      pushResult(RES_ALERT, payload.length() > 0, payload.length() ? payload.c_str() : "{}", 0);
     } else {
       bool alertImage = job.type == JOB_ALERT_IMAGE;
       size_t expected = alertImage ? 296U * 160U * 2U : IMAGE_BUFFER_BYTES;
-      bool ok = httpGetBinary(job.path, imageBuffer, expected, 15000);
-      pushResult(alertImage ? RES_ALERT_IMAGE : RES_MOMENT_IMAGE, ok, "");
+      bool ok = httpGetBinary(job.path, imageBuffer, expected, 15000, job.generation);
+      pushResult(alertImage ? RES_ALERT_IMAGE : RES_MOMENT_IMAGE, ok, "", job.generation);
       // Keep sole ownership of imageBuffer until loop() finishes drawing.
       uint8_t ack;
       if (imageAckQueue) xQueueReceive(imageAckQueue, &ack, portMAX_DELAY);
@@ -2236,7 +2266,7 @@ void dropQueuedStatusJobs() {
 
 void apiAndReportLong(const char* path, const String& body, const char* okMsg,
                       uint32_t timeoutMs) {
-  ApiJob job;
+  ApiJob job{};
   job.type = JOB_POST;
   job.timeoutMs = timeoutMs;
   strlcpy(job.path, path, sizeof(job.path));
@@ -2257,7 +2287,7 @@ void apiAndReport(const char* path, const String& body, const char* okMsg) {
 
 void enqueueStatusFetch() {
   if (statusFetchQueued) return;  // collapse SSE event bursts into one fetch
-  ApiJob job;
+  ApiJob job{};
   job.type = JOB_STATUS;
   job.timeoutMs = 0;
   job.path[0] = job.body[0] = job.okMsg[0] = '\0';
@@ -2265,7 +2295,7 @@ void enqueueStatusFetch() {
 }
 
 bool enqueueAlertFetch() {
-  ApiJob job;
+  ApiJob job{};
   job.type = JOB_ALERT;
   job.timeoutMs = 0;
   job.path[0] = job.body[0] = job.okMsg[0] = '\0';
@@ -2275,6 +2305,7 @@ bool enqueueAlertFetch() {
 
 bool enqueueImageFetch(uint8_t type, const char* path) {
   ApiJob job;
+  job.generation = imageGeneration.load();
   job.type = type;
   job.timeoutMs = 15000;
   strlcpy(job.path, path, sizeof(job.path));
@@ -2336,6 +2367,7 @@ void showAlertOverlay() {
     screenOn = true;
     setBacklight(BL_FULL);
   }
+  invalidateImages();
   drawToast("loading alert...", COL_ACCENT);
   alertImagePending = !enqueueImageFetch(
         JOB_ALERT_IMAGE, "/api/panel/alert.rgb565?w=296&h=160");
@@ -2371,6 +2403,7 @@ void showMomentPreview() {
     drawToastAlarm("no network");
     return;
   }
+  invalidateImages();
   drawToast("loading photo...", COL_ACCENT);
   if (!enqueueImageFetch(
         JOB_MOMENT_IMAGE, "/api/panel/moment.rgb565?w=296&h=186")) {
@@ -2845,6 +2878,7 @@ void updateTouch() {
   // An alert popup or photo preview covers the screen: any tap dismisses.
   if (alertActive || previewActive) {
     if (touching && !ignoreUntilRelease) {
+      invalidateImages();
       alertActive = false;
       previewActive = false;
       ignoreUntilRelease = true;
@@ -3241,16 +3275,18 @@ void loop() {
       }
       alertPollDone = true;       // the deep-sleep alert poll has its answer
     } else {
-      if (res.ok && res.type == RES_ALERT_IMAGE) {
-        alertImagePending = false;
-        renderAlertOverlay();
+      if (res.generation == imageGeneration.load()) {
+        if (res.ok && res.type == RES_ALERT_IMAGE) {
+          alertImagePending = false;
+          renderAlertOverlay();
+        }
+        else if (res.ok && res.type == RES_MOMENT_IMAGE) renderMomentPreview();
+        else if (res.type == RES_ALERT_IMAGE) {
+          alertImagePending = true;
+          lastAlertRetryMs = millis();
+          if (screenOn) drawToastAlarm("alert load failed");
+        } else if (screenOn) drawToastAlarm("photo load failed");
       }
-      else if (res.ok && res.type == RES_MOMENT_IMAGE) renderMomentPreview();
-      else if (res.type == RES_ALERT_IMAGE) {
-        alertImagePending = true;
-        lastAlertRetryMs = millis();
-        if (screenOn) drawToastAlarm("alert load failed");
-      } else if (screenOn) drawToastAlarm("photo load failed");
       uint8_t ack = 1;
       if (imageAckQueue) xQueueSend(imageAckQueue, &ack, 0);
     }

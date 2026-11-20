@@ -14,6 +14,10 @@ public:
   void setConnectTimeout(int32_t) {}
   int POST(uint8_t*, size_t) { return -1; }
   int POST(const String&) { return -1; }
+  void collectHeaders(const char**, size_t) {}
+  int getSize() { return -1; }
+  String header(const char*) { return String(""); }
+  bool connected() { return false; }
   int GET() { return -1; }
   String getString() { return String(""); }
   WiFiClient* getStreamPtr() { static WiFiClient c; return &c; }

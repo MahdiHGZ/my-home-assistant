@@ -1,5 +1,5 @@
 evdev
-opencv-python
+opencv-python>=4.9,<5
 python-miio
 pytapo
 python-dotenv
