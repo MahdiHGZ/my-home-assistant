@@ -102,9 +102,41 @@ _COMBO_KEY_MODES: dict[str, yeelight_bulb_utils.BulbMode] = {
 }
 
 
-_SINGLE_KEYS = set(_SINGLE_KEY_MODES) | {"KEY_KP1", "KEY_KP4", "KEY_KP5", "KEY_KPPLUS", "KEY_KPMINUS"}
-_COMBO_KEYS = set(_COMBO_KEY_MODES) | {"KEY_KP1", "KEY_KP2", "KEY_KP3", "KEY_KP4", "KEY_KP6",
-                                     "KEY_KPMINUS", "KEY_KPASTERISK", "KEY_KPSLASH", "KEY_BACKSPACE"}
+# Each binding carries the action label used by the dashboard's printable map.
+_SINGLE_BINDINGS = {
+    "KEY_KP1": ("key_vacuum_toggle", "_do_vacuum_toggle", ()),
+    "KEY_KP4": ("party", "_do_party_toggle", ()),
+    "KEY_KP5": ("cycle", "_do_color_cycle_start", ()),
+    "KEY_KPPLUS": ("key_bright_up", "_do_brightness", (_BRIGHTNESS_STEP,)),
+    "KEY_KPMINUS": ("key_bright_down", "_do_brightness", (-_BRIGHTNESS_STEP,)),
+}
+_COMBO_BINDINGS = {
+    "KEY_KP4": ("prev", "_do_color_cycle_advance", (-1,)),
+    "KEY_KP6": ("next", "_do_color_cycle_advance", (1,)),
+    "KEY_KPMINUS": ("all_off", "_do_all_off", ()),
+    "KEY_KPASTERISK": ("random", "_do_random_color", (False,)),
+    "KEY_KPSLASH": ("each", "_do_random_color", (True,)),
+    "KEY_BACKSPACE": ("undo", "_do_undo", ()),
+}
+_CAPTURE_BINDINGS = {
+    "KEY_KP1": ("capture", False, False),
+    "KEY_KP2": ("capture_flash", True, False),
+    "KEY_KP3": ("key_countdown", True, True),
+}
+_SINGLE_KEYS = _SINGLE_KEY_MODES.keys() | _SINGLE_BINDINGS.keys()
+_COMBO_KEYS = _COMBO_KEY_MODES.keys() | _COMBO_BINDINGS.keys() | _CAPTURE_BINDINGS.keys()
+
+
+def keypad_bindings():
+    return [
+        {"code": key.removeprefix("KEY_"), "combo": combo, "mode": mode.name}
+        for combo, modes in ((False, _SINGLE_KEY_MODES), (True, _COMBO_KEY_MODES))
+        for key, mode in modes.items()
+    ] + [
+        {"code": key.removeprefix("KEY_"), "combo": combo, "label": binding[0]}
+        for combo, bindings in ((False, _SINGLE_BINDINGS), (True, _COMBO_BINDINGS), (True, _CAPTURE_BINDINGS))
+        for key, binding in bindings.items()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +223,8 @@ class Controller(LightActions):
     both the keypad handlers and :meth:`run_action` (the web entry point).
     """
 
+    keypad_bindings = staticmethod(keypad_bindings)
+
     def __init__(self, household=None) -> None:
         self.household = household
         self._color_cycle_index = 0
@@ -216,9 +250,10 @@ class Controller(LightActions):
             return
         handler = self._handle_combo_key if combo else self._handle_single_key
         lane = self.lights_worker
-        if combo and keycode in {"KEY_KP1", "KEY_KP2", "KEY_KP3"}:
+        if combo and keycode in _CAPTURE_BINDINGS:
             lane = self.camera_worker
-            fn = functools.partial(self._prepare_capture, flash=keycode != "KEY_KP1", countdown=keycode == "KEY_KP3")
+            _, flash, countdown = _CAPTURE_BINDINGS[keycode]
+            fn = functools.partial(self._prepare_capture, flash=flash, countdown=countdown)
         else:
             fn = functools.partial(handler, keycode)
 
@@ -472,7 +507,7 @@ class Controller(LightActions):
         yeelight_bulb_utils.full_off(bulbs)
         self._last_mode = None
 
-    def _do_random_color(self, *, each: bool) -> None:
+    def _do_random_color(self, each: bool) -> None:
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
         if yeelight_bulb_utils.is_party_running():
             yeelight_bulb_utils.stop_party_dance()
@@ -490,7 +525,7 @@ class Controller(LightActions):
 
     def _do_control(
         self,
-        targets: str | None,
+        targets: str | list[str] | None,
         *,
         power: bool | None = None,
         brightness: int | None = None,
@@ -584,7 +619,7 @@ class Controller(LightActions):
     @retry_with_discovery(max_attempts=3)
     def _handle_single_key(self, keycode: str) -> None:
         """Dispatches standalone (non-combo) key actions."""
-        if keycode == "KEY_KP4":
+        if keycode in _SINGLE_BINDINGS and _SINGLE_BINDINGS[keycode][1] == "_do_party_toggle":
             self._do_party_toggle()
             return
 
@@ -593,23 +628,16 @@ class Controller(LightActions):
 
         if keycode in _SINGLE_KEY_MODES:
             self._do_apply_mode(_SINGLE_KEY_MODES[keycode])
-        elif keycode == "KEY_KP5":
-            self._do_color_cycle_start()
-        elif keycode == "KEY_KPPLUS":
-            self._do_brightness(_BRIGHTNESS_STEP)
-        elif keycode == "KEY_KPMINUS":
-            self._do_brightness(-_BRIGHTNESS_STEP)
-        elif keycode == "KEY_KP1":
-            self._do_vacuum_toggle()
+        elif keycode in _SINGLE_BINDINGS:
+            _, method, args = _SINGLE_BINDINGS[keycode]
+            getattr(self, method)(*args)
 
     @retry_with_discovery(max_attempts=3)
     def _handle_combo_key(self, keycode: str) -> None:
         """Dispatches KP0 + key combo actions."""
-        if keycode == "KEY_KP6":
-            self._do_color_cycle_advance(1)
-            return
-        if keycode == "KEY_KP4":
-            self._do_color_cycle_advance(-1)
+        binding = _COMBO_BINDINGS.get(keycode)
+        if binding and binding[1] == "_do_color_cycle_advance":
+            self._do_color_cycle_advance(*binding[2])
             return
 
         if yeelight_bulb_utils.is_party_running():
@@ -617,14 +645,9 @@ class Controller(LightActions):
 
         if keycode in _COMBO_KEY_MODES:
             self._do_apply_mode(_COMBO_KEY_MODES[keycode])
-        elif keycode == "KEY_KPMINUS":
-            self._do_all_off()
-        elif keycode == "KEY_KPASTERISK":
-            self._do_random_color(each=False)
-        elif keycode == "KEY_KPSLASH":
-            self._do_random_color(each=True)
-        elif keycode == "KEY_BACKSPACE":
-            self._do_undo()
+        elif binding:
+            _, method, args = binding
+            getattr(self, method)(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +673,8 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable debug logging.",
     )
+    parser.add_argument("--demo", action="store_true", help="Serve simulated household devices on loopback.")
+    parser.add_argument("--watch-assets", action="store_true", help="Refresh dashboard tabs after local asset edits.")
     parser.add_argument(
         "--no-web",
         action="store_true",
@@ -765,6 +790,13 @@ def main() -> None:
     # A third-party device call can outlive Python executor shutdown. Bound
     # process exit even when a device never releases an in-flight socket.
     signal.signal(signal.SIGALRM, lambda *_: os._exit(1))
+    demo = None
+    if args.demo:
+        if args.no_web:
+            raise SystemExit("--demo requires the web dashboard.")
+        from demo_house import install
+        demo = install()
+        args.web_host = "127.0.0.1"
     controller = Controller(Household(os.getenv("COUKAB_STATE_DB", "coukab.sqlite3")))
     stopped = threading.Event()
 
@@ -772,14 +804,15 @@ def main() -> None:
     if not args.no_web:
         import web_server
         try:
-            web = web_server.start(controller, host=args.web_host, port=args.web_port)
+            web = web_server.start(controller, host=args.web_host, port=args.web_port,
+                                   demo=args.demo, watch_assets=args.watch_assets)
         except OSError as e:
             logger.error("Could not start web interface on %s:%d — %s", args.web_host, args.web_port, e)
 
     try:
         _systemd_notify("READY=1")
         threading.Thread(target=_watchdog, args=(controller, stopped), daemon=True).start()
-        ran = run_keyboard(args.device, controller, grab=args.grab, required=web is None)
+        ran = not args.demo and run_keyboard(args.device, controller, grab=args.grab, required=web is None)
         if not ran and web is not None:
             # Keypad unavailable but the web interface is up — stay alive for it.
             logger.info("Web-only mode. Press Ctrl+C to stop.")
@@ -798,6 +831,8 @@ def main() -> None:
             web.shutdown()
             web.server_close()
         controller.shutdown()
+        if demo:
+            demo.cleanup()
 
 
 if __name__ == "__main__":

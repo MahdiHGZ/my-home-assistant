@@ -10,6 +10,7 @@ const selectedBulbs = new Set();
 const selectedRooms = new Set();
 let polling = false;
 let statusRevision = 0;
+let statusReceivedAt = 0;
 let driveEpoch = null;
 let sseConnected = false;
 let eventSource = null;
@@ -106,7 +107,7 @@ const I18N = {
     captured: "Captured", done: "Done", hold_stop: "Hold to stop",
     download: "Download", delete: "Delete", deleted: "Deleted", hold_delete: "Hold to delete",
     delete_pass_prompt: "Delete password:",
-    undone: "Undone", undo_q: "Undo?", off_done: "All lights off",
+    undone: "Undone", undo_q: "Undo latest change", off_done: "All lights off",
     m_battery: "Battery", m_status: "Status", m_suction: "Suction", m_area: "Area",
     m_fault: "Fault", m_power: "Power", m_pm25: "PM2.5", m_temp: "Temp",
     m_humidity: "Humidity", m_mode: "Mode", m_fan: "Fan", m_filter: "Filter",
@@ -145,7 +146,7 @@ const I18N = {
     captured: "ثبت شد", done: "انجام شد", hold_stop: "برای توقف نگه دارید",
     download: "دانلود", delete: "حذف", deleted: "حذف شد", hold_delete: "برای حذف نگه دارید",
     delete_pass_prompt: "رمز حذف:",
-    undone: "واگرد شد", undo_q: "واگرد؟", off_done: "همه چراغ‌ها خاموش شد",
+    undone: "واگرد شد", undo_q: "واگرد آخرین تغییر", off_done: "همه چراغ‌ها خاموش شد",
     m_battery: "باتری", m_status: "وضعیت", m_suction: "مکش", m_area: "مساحت",
     m_fault: "خطا", m_power: "برق", m_pm25: "PM2.5", m_temp: "دما",
     m_humidity: "رطوبت", m_mode: "حالت", m_fan: "فن", m_filter: "فیلتر",
@@ -194,6 +195,7 @@ function applyLang() {
     buildDynamic();
     if (lastStatus) renderAll(lastStatus);
   }
+  if (typeof dashboardUI !== "undefined") dashboardUI.applyLanguage();
 }
 
 // --- networking --------------------------------------------------------------
@@ -205,7 +207,7 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const retriable = method === "POST" && body?.action !== "remote" &&
-    /^\/api\/(lights\/(control|action)|purifier\/action|vacuum\/action|camera\/(capture|delete)|routines\/run)$/.test(path);
+    /^\/api\/(lights\/(control|action|library\/(save|recall))|purifier\/action|vacuum\/action|camera\/(capture|delete)|routines\/run)$/.test(path);
   if (retriable) {
     opts.headers["Idempotency-Key"] = Array.from(crypto.getRandomValues(new Uint8Array(16)),
       byte => byte.toString(16).padStart(2, "0")).join("");
@@ -253,20 +255,54 @@ async function waitForJob(id) {
 }
 
 let toastTimer = null;
-function toast(msg, kind = "", actionLabel = null, actionFn = null) {
-  const el = $("#toast");
-  el.innerHTML = "";
-  el.append(msg);
-  if (actionLabel && actionFn) {
-    const btn = document.createElement("button");
-    btn.className = "toast-action";
-    btn.textContent = actionLabel;
-    btn.onclick = () => { el.className = "toast"; actionFn(); };
-    el.appendChild(btn);
+const toastActions = [];
+
+function showToastAction(restoreFocus = false) {
+  const box = $("#toastAction");
+  const notice = toastActions[0];
+  box.hidden = !notice;
+  box.className = notice ? `toast show ${notice.kind}` : "toast";
+  box.replaceChildren();
+  if (!notice) {
+    if (restoreFocus && document.contains(noticeOrigin) && noticeOrigin.getClientRects().length) noticeOrigin.focus();
+    return;
   }
-  el.className = `toast show ${kind}`;
+  const finish = (run) => {
+    const focused = box.contains(document.activeElement);
+    toastActions.shift();
+    showToastAction(focused);
+    if (run) notice.actionFn();
+  };
+  const undo = element("button", "toast-action", notice.actionLabel);
+  undo.onclick = () => finish(true);
+  const dismiss = element("button", "toast-dismiss", t("dismiss_notice"));
+  dismiss.onclick = () => finish(false);
+  const description = element("span", "", notice.msg);
+  description.setAttribute("role", "status");
+  box.append(description, undo, dismiss);
+  if (toastActions.length > 1) box.append(element("span", "toast-count", `+${toastActions.length - 1}`));
+  if (restoreFocus) undo.focus();
+}
+
+let noticeOrigin = null;
+function toast(msg, kind = "", actionLabel = null, actionFn = null, origin = document.activeElement) {
+  if (actionLabel && actionFn) {
+    if (!toastActions.length) noticeOrigin = origin;
+    toastActions.push({ msg, kind, actionLabel, actionFn });
+    if (toastActions.length === 1) showToastAction();
+    else {
+      const box = $("#toastAction");
+      const count = box.querySelector(".toast-count") || box.appendChild(element("span", "toast-count"));
+      count.textContent = `+${toastActions.length - 1}`;
+    }
+    return;
+  }
+  // Status feedback has its own live region and never replaces an Undo prompt.
+  const box = $("#toastStatus");
+  if (box.textContent !== msg || !box.classList.contains("show")) box.textContent = msg;
+  box.className = `toast show ${kind}`;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = "toast"; }, actionLabel ? 5000 : 2600);
+  toastTimer = setTimeout(() => { box.className = "toast"; }, 2600);
 }
 
 // Fire an action with pending state on the button, haptic tick, error flash
@@ -277,7 +313,7 @@ async function act(method, path, body, opts = {}) {
   if (btn) btn.classList.add("pending");
   try {
     const res = await api(method, path, body);
-    if (opts.okMsg) toast(opts.okMsg, "good", opts.actionLabel, opts.actionFn);
+    if (opts.okMsg) toast(opts.okMsg, "good", opts.actionLabel, opts.actionFn, btn);
     if (!sseConnected) setTimeout(pollStatus, 250);
     return res;
   } catch (e) {
@@ -295,7 +331,7 @@ async function act(method, path, body, opts = {}) {
 }
 
 function targets() {
-  return selectedBulbs.size ? [...selectedBulbs].join(",") : "all";
+  return selectedBulbs.size ? [...selectedBulbs] : "all";
 }
 
 // --- color helpers -----------------------------------------------------------
@@ -357,7 +393,7 @@ function buildBulbGrid() {
   const grid = $("#bulbGrid");
   grid.innerHTML = "";
   if (!caps.bulbs.length) {
-    grid.innerHTML = '<p class="hint">No bulbs registered in bulb.json.</p>';
+    grid.append(element("p", "hint", t("no_bulbs")));
     return;
   }
   caps.bulbs.forEach((name) => {
@@ -365,10 +401,13 @@ function buildBulbGrid() {
     cell.className = "bulb off";
     cell.dataset.name = name;
     cell.append(element("span", "dot"), element("span", "name", name), element("span", "meta", "—"));
+    cell.setAttribute("aria-pressed", String(selectedBulbs.has(name)));
+    cell.classList.toggle("selected", selectedBulbs.has(name));
     cell.onclick = () => {
       if (selectedBulbs.has(name)) selectedBulbs.delete(name);
       else selectedBulbs.add(name);
       cell.classList.toggle("selected", selectedBulbs.has(name));
+      cell.setAttribute("aria-pressed", String(selectedBulbs.has(name)));
     };
     grid.appendChild(cell);
   });
@@ -529,7 +568,7 @@ function renderVacuum(v) {
   if (v.status != null) parts.push(metric(t("m_status"), trName(v.status)));
   if (v.suction_level != null) parts.push(metric(t("m_suction"), trName(v.suction_level)));
   if (v.cleaning_area != null) parts.push(metric(t("m_area"), `${v.cleaning_area} m²`));
-  if (v.fault) parts.push(metric(t("m_fault"), v.fault));
+  if (Number(v.fault) !== 0 && v.fault) parts.push(metric(t("m_fault"), typeof dashboardUI === "undefined" ? v.fault : dashboardUI.fault(v.fault)));
   out.replaceChildren(...parts);
   setStat("#statVacuum", `${trName(v.status) || "—"} · ${v.battery ?? "?"}%`);
   syncSelectByName($("#vacSuction"), v.suction_level);
@@ -556,7 +595,8 @@ function renderAir(a) {
   if (a.filter_left_days != null) parts.push(metric(t("m_filter"), `${a.filter_left_days}d`));
   out.replaceChildren(...parts);
   const isOn = a.power === "ON";
-  setStat("#statAir", isOn ? `${a.pm25 ?? "?"} PM2.5` : t("off"), !isOn);
+  const reading = a.pm25 == null ? "" : ` · ${a.pm25.toLocaleString(lang)} PM2.5`;
+  setStat("#statAir", t(isOn ? "on" : "off") + reading, !isOn);
 
   markActive("#airModes", a.mode);
   markActive("#airFan", a.fan_level);
@@ -585,7 +625,7 @@ function momentTile(src, { large = false } = {}) {
   link.target = "_blank";
   link.rel = "noopener";
   const img = document.createElement("img");
-  img.src = src;
+  img.src = src + "?thumb=1";
   img.alt = "moment";
   img.loading = "lazy";
   img.decoding = "async";
@@ -617,7 +657,7 @@ function momentTile(src, { large = false } = {}) {
 
 function renderMoments(m) {
   const word = m.count === 1 ? t("moments_one") : t("moments_many");
-  setStat("#statCamera", `${m.count} ${word}`);
+  if (typeof dashboardUI === "undefined") setStat("#statCamera", `${m.count} ${word}`);
 
   const latest = $("#momentLatest");
   if (m.latest) {
@@ -701,11 +741,13 @@ function setToggle(sel, on) {
 }
 
 function renderAll(s) {
+  if (lastStatus !== s) statusReceivedAt = Date.now();
   lastStatus = s;
   renderLights(s.lights || {});
   renderVacuum(s.vacuum || {});
   renderAir(s.purifier || {});
   renderMoments(s.moments || { count: 0, recent: [] });
+  if (typeof dashboardUI !== "undefined") dashboardUI.render(s);
 }
 
 function setLive(ok) {
@@ -734,6 +776,10 @@ async function pollStatus() {
 
 function connectEvents() {
   if (eventSource) eventSource.close();
+  if (typeof EventSource !== "function") {
+    sseConnected = false;
+    return;
+  }
   eventSource = new EventSource("/api/events");
   eventSource.addEventListener("status", (e) => {
     sseConnected = true;
@@ -790,7 +836,17 @@ function wireEvents() {
     if (!tEl) return;
     const action = tEl.dataset.light;
     const body = { action };
-    if (action === "mode") body.mode = tEl.dataset.mode;
+    if (action === "mode") {
+      body.mode = tEl.dataset.mode;
+      const scene = caps?.scene_modes?.find(mode => mode.key === body.mode);
+      if (selectedBulbs.size && scene) {
+        const selection = { targets: targets(), power: true };
+        if (scene.brightness != null) selection.brightness = scene.brightness;
+        if (scene.color != null) selection.color = scene.color;
+        act("POST", "/api/lights/control", selection, { btn: tEl });
+        return;
+      }
+    }
     const opts = { btn: tEl };
     if (action === "all_off") {
       opts.okMsg = t("off_done");
@@ -979,7 +1035,7 @@ function wireDpadHold(btn) {
     loopTimer = setTimeout(loop, 400);
   };
 
-  btn.addEventListener("pointerdown", (e) => {
+  const press = e => {
     e.preventDefault();
     if (held || !driveEpoch) return;
     epoch = driveEpoch;
@@ -989,6 +1045,10 @@ function wireDpadHold(btn) {
     held = true;
     btn.classList.add("driving");
     loop();
+  };
+  btn.addEventListener("pointerdown", press);
+  btn.addEventListener("keydown", e => {
+    if (e.key === " " || e.key === "Enter") press(e);
   });
   const release = () => {
     if (!held) return;
@@ -998,6 +1058,10 @@ function wireDpadHold(btn) {
     send(5); // stop
   };
   window.addEventListener("blur", release);
+  btn.addEventListener("blur", release);
+  btn.addEventListener("keyup", e => {
+    if (e.key === " " || e.key === "Enter") release();
+  });
   btn.addEventListener("pointerup", release);
   btn.addEventListener("pointerleave", release);
   btn.addEventListener("pointercancel", release);
@@ -1311,18 +1375,29 @@ function wireHousehold(actions) {
 // --- tab routing for mobile bottom nav ---------------------------------------
 
 function initTabs() {
+  let current = "home", homeScroll = 0, homeFocus = null;
   const tabs = document.querySelectorAll(".nav-tab");
   const cards = {
-    home: [".dashboard", "#panelAlertCard", "#routinesCard"],
+    home: ["#overviewAttention", ".dashboard", "#panelAlertCard", "#routinesCard", "#preferencesCard"],
     lights: ["#lightsCard"],
     appliances: ["#vacuumCard", "#airCard"],
     camera: ["#cameraCard"],
+    rooms: ["#roomCard"],
     chat: ["#assistantCard"]
   };
 
-  function showTab(tabName) {
+  function showTab(tabName, focusSelector) {
+    if (current === "home" && tabName !== "home") {
+      homeScroll = window.scrollY;
+      homeFocus = document.activeElement;
+    }
+    const returning = current !== "home" && tabName === "home";
+    current = tabName;
     tabs.forEach(btn => {
-      btn.classList.toggle("active", btn.dataset.tab === tabName);
+      const active = btn.dataset.tab === tabName;
+      btn.classList.toggle("active", active);
+      if (active) btn.setAttribute("aria-current", "page");
+      else btn.removeAttribute("aria-current");
     });
 
     Object.keys(cards).forEach(key => {
@@ -1344,7 +1419,17 @@ function initTabs() {
       });
     });
     
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    window.scrollTo({ top: returning ? homeScroll : 0, behavior: "instant" });
+    if (returning && homeFocus?.isConnected && homeFocus !== document.body) {
+      homeFocus.focus({ preventScroll: true });
+    } else if (focusSelector) {
+      const destination = $(focusSelector);
+      if (destination) {
+        if (!destination.matches("button, a, summary, input, select")) destination.setAttribute("tabindex", "-1");
+        destination.focus();
+        destination.scrollIntoView?.({ block: "nearest" });
+      }
+    }
   }
 
   tabs.forEach(btn => {
@@ -1354,11 +1439,13 @@ function initTabs() {
   });
 
   showTab("home");
+  return showTab;
 }
 
 // --- init --------------------------------------------------------------------
 
 async function init() {
+  if (typeof dashboardUI !== "undefined") dashboardUI.installStrings();
   hydrateIcons();
   applyLang();
   wireEvents();
@@ -1389,13 +1476,14 @@ async function init() {
   }
 
   wireHousehold(caps.actions || []);
-  initTabs();
+  const showTab = initTabs();
+  if (typeof dashboardUI !== "undefined") dashboardUI.init(showTab);
 
   connectEvents();       // live pushes; falls back to polling on failure
   pollStatus();          // immediate first paint even if SSE is slow to open
   loadRooms();
   setInterval(() => {
-    if (document.hidden || sseConnected) return;
+    if (document.hidden || (sseConnected && Date.now() - statusReceivedAt < 15000)) return;
     pollStatus();
   }, POLL_MS);
 }

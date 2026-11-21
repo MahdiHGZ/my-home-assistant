@@ -16,6 +16,8 @@
 #include <ctype.h>
 #include <math.h>
 #include <string>
+#include <deque>
+#include <vector>
 
 #include "Print.h"
 
@@ -162,18 +164,37 @@ struct HostESP {
 inline HostESP ESP;
 
 // ---- FreeRTOS (stubs; never actually scheduled on host) ---------------------
-typedef void* QueueHandle_t;
+struct HostQueue {
+  size_t capacity, itemSize;
+  std::deque<std::vector<uint8_t>> items;
+};
+typedef HostQueue* QueueHandle_t;
 typedef void* TaskHandle_t;
 typedef int   BaseType_t;
 typedef unsigned UBaseType_t;
 #define pdTRUE 1
 #define pdFALSE 0
 #define portMAX_DELAY 0xffffffffUL
-inline QueueHandle_t xQueueCreate(UBaseType_t, UBaseType_t) { return (QueueHandle_t)1; }
-inline BaseType_t xQueueReceive(QueueHandle_t, void*, uint32_t) { return pdFALSE; }
-inline BaseType_t xQueueSend(QueueHandle_t, const void*, uint32_t) { return pdTRUE; }
-inline BaseType_t xQueueSendToFront(QueueHandle_t, const void*, uint32_t) { return pdTRUE; }
-inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t) { return 0; }
+inline QueueHandle_t xQueueCreate(UBaseType_t capacity, UBaseType_t size) {
+  return new HostQueue{capacity, size, {}};
+}
+inline BaseType_t xQueueReceive(QueueHandle_t q, void* dest, uint32_t) {
+  if (!q || q->items.empty()) return pdFALSE;
+  memcpy(dest, q->items.front().data(), q->itemSize);
+  q->items.pop_front();
+  return pdTRUE;
+}
+inline BaseType_t hostSend(QueueHandle_t q, const void* item, bool front) {
+  if (!q || q->items.size() >= q->capacity) return pdFALSE;
+  const uint8_t* bytes = static_cast<const uint8_t*>(item);
+  std::vector<uint8_t> copy(bytes, bytes + q->itemSize);
+  if (front) q->items.push_front(copy);
+  else q->items.push_back(copy);
+  return pdTRUE;
+}
+inline BaseType_t xQueueSend(QueueHandle_t q, const void* item, uint32_t) { return hostSend(q, item, false); }
+inline BaseType_t xQueueSendToFront(QueueHandle_t q, const void* item, uint32_t) { return hostSend(q, item, true); }
+inline UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q) { return q ? q->items.size() : 0; }
 inline BaseType_t xTaskCreatePinnedToCore(void (*)(void*), const char*, uint32_t,
                                           void*, UBaseType_t, TaskHandle_t*, BaseType_t) { return pdTRUE; }
 inline void vTaskDelay(uint32_t) {}

@@ -198,6 +198,7 @@ PROP = {
     "dnd_start_minute": (12, 3),
     "dnd_end_hour":     (12, 4),
     "dnd_end_minute":   (12, 5),
+    "dnd_timezone":     (12, 6),
     # siid 15 — filter
     "filter_life":      (15, 1),
     "filter_hours":     (15, 2),

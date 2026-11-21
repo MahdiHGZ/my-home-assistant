@@ -162,6 +162,10 @@ Firmware OTA starts only when the sketch has a non-empty `OTA_PASSWORD` defined 
 - The web dashboard can save and run up to 32 routines of 1–16 steps. Each routine can have a daily time in the server's local timezone. The scheduler claims a routine once per local date. A repeated clock hour runs once, and a skipped hour or a service outage skips the missed run. An interrupted scheduled run retains its claim, and its last step is marked unconfirmed. Inspect **Recent runs** for per-device results.
 - `COUKAB_STATE_DB` sets the SQLite path for routines, recent runs and action history. The default is `coukab.sqlite3` in the service working directory. The service retains the latest 1,000 action records and up to 24 hours of minute-level air readings. Expand **Air quality over 24 hours** for hourly averages. `GET /api/history` also returns the latest 100 action records with source, duration and outcome.
 
+Open **S20 advanced settings** to read the active map's cleaning profiles, mop route, double pass and do-not-disturb settings. **Verify support with current settings** resubmits the settings already on the vacuum and checks the readback. Editing becomes available for that firmware when verification succeeds. DND editing also requires a readable device timezone so Coukab can preserve it. The purifier's filter and motor detail view reports the reading time and uses the detected model's MIoT properties. [S20 MIoT spec](https://home.miot-spec.com/spec/xiaomi.vacuum.d106gl) · [4 Lite MIoT spec](https://home.miot-spec.com/spec/zhimi.airp.rmb1)
+
+In **Vacuum and air purifier routine**, choose a mode and settling period, review the preview, and enable the routine. It observes the S20 locally, including cleanings started from Xiaomi Home. If a purifier is offline during cleaning, Coukab waits for a usable reading before starting. After cleaning, it waits for the configured interval and checks each setting before restoring it. A missed vacuum reading pauses the decision until the device reports again. Settings that were changed manually stay as they are. The routine and any pending restoration use the household database, so disabling the routine or restarting the server retains settings still awaiting restoration.
+
 ---
 
 ## What's on the web page
@@ -301,3 +305,13 @@ venv/bin/python -m unittest discover -s tests -v
 | [GitHub Issues](https://github.com/MahdiHGZ/my-home-assistant/issues) | Project bugs and feature requests, labeled by component and priority |
 | [bulb.json](bulb.json), `.env` (copy [example.env](example.env)) | Your device configuration |
 | [coukab-lan.service](coukab-lan.service) | systemd unit |
+
+## First-run setup, demo and integrations
+
+Open **Setup** in the dashboard to see missing configuration keys and the manual address. On LAN interfaces the server also advertises `http://coukab.local:8080/` over mDNS. Adjust `COUKAB_LOCAL_NAME` for multiple installations or set `COUKAB_MDNS=0` to disable the advertisement. After editing device credentials locally in `.env`, use **Reload device settings**. Provide complete groups. Omitted groups keep their settings and a complete group of empty values disables that device. Running device calls finish with their original transport. Change server authentication or broker settings by restarting the service.
+
+For a hardware-free household run `uv run --locked main.py --demo --watch-assets` and open `http://127.0.0.1:8080/`. The demo uses temporary state, simulated device transports, a generated camera frame and loopback networking. The optional asset watcher refreshes open dashboard tabs when local web files change.
+
+To share devices with Home Assistant, configure the same MQTT 5 broker on both systems, restart Coukab, then open **Setup → Home Assistant · MQTT**. Enable sharing and select individual readings and named routines. The dashboard and keypad work independently of the broker. Clearing a selection removes its discovery entry. Disable sharing and let the connected broker acknowledge the removals before removing the broker configuration. Restrict the command topics to trusted publishers using your broker's ACLs and enable TLS for remote connections.
+
+An external door contact can trigger an existing evening routine. Share the routine in Setup, then create a Home Assistant automation with the contact changing to open as its trigger and **Button: Press** on the discovered Coukab routine as its action. Its device steps appear under **Recent runs**. The bridge ignores retained commands and stores command IDs for 24 hours to deduplicate redeliveries. [Home Assistant MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)

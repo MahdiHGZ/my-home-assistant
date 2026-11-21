@@ -88,6 +88,14 @@ class MiotHelper:
             logger.info("Connected to %s at %s.", self.label.lower(), self.ip)
             return device
 
+    def reconfigure(self, ip: str, token: str, fields: dict[str, str]) -> None:
+        # A running operation owns its device handle until it returns. Future
+        # calls construct a new transport under the same cache lock.
+        with self._lock:
+            if self.ip != ip or self.token != token:
+                self.ip, self.token, self.env_vars = ip, token, fields
+                self._device = None
+
     def invalidate(self) -> None:
         """Drop the cached device so the next call reconnects."""
         with self._lock:
@@ -103,7 +111,9 @@ class MiotHelper:
         with self._io_lock:
             siid, piid = self.prop_map[name]
             result = device.get_property_by(siid, piid)
-            return result[0].get("value") if isinstance(result, list) else result
+            if isinstance(result, list):
+                return result[0].get("value") if result and result[0].get("code", 0) == 0 else None
+            return result
 
     def set_prop(self, device: Any, name: str, value: Any) -> Any:
         with self._io_lock:

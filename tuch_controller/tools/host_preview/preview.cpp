@@ -100,6 +100,30 @@ int main(int argc, char** argv) {
   invalidateImages();
   assert(!imageTransferActive(gen, 0, 1, 10));
 
+  if (out == "--verify-status") {
+    char line[4096];
+    assert(fgets(line, sizeof(line), stdin));
+    applyStatusJson(String(line));
+    assert(st.valid && st.vacBattery == 77 && st.pm25 == 18 && st.serverHour == 21);
+    assert(st.lightsAvail && st.bulbsOn == 1 && curBrightness == 63);
+    int16_t x, y;
+    ts.sample = TS_Point(tsMinX, tsMaxY, TOUCH_MIN_PRESSURE);
+    assert(getTouchPoint(x,y) && x == 0 && y == 0);
+    ts.sample = TS_Point(tsMaxX, tsMinY, TOUCH_MIN_PRESSURE);
+    assert(getTouchPoint(x,y) && x == SCREEN_W - 1 && y == SCREEN_H - 1);
+    ts.sample.z = TOUCH_MIN_PRESSURE - 1;
+    assert(!getTouchPoint(x,y));
+    ApiJob job{};
+    apiQueue = xQueueCreate(2, sizeof(ApiJob));
+    job.type = JOB_STATUS; assert(enqueueJob(job));
+    job.type = JOB_POST; assert(enqueueJob(job));
+    assert(!enqueueJob(job));
+    dropQueuedStatusJobs();
+    assert(uxQueueMessagesWaiting(apiQueue) == 1);
+    assert(xQueueReceive(apiQueue, &job, 0) == pdTRUE && job.type == JOB_POST);
+    delete apiQueue;
+    return 0;
+  }
   tft.setRotation(1);   // landscape 320x240 — the firmware does this in setup()
   tft.cp437(true);      // match setup(): degree (0xF8) / micro (0xE6) glyphs
   applyTheme(true);     // dark palette -> COL_* runtime vars

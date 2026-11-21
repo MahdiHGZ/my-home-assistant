@@ -17,6 +17,7 @@ public:
   bool begin() { return true; }
   bool begin(SPIClass&) { return true; }
   void setRotation(uint8_t) {}
-  bool touched() { return false; }
-  TS_Point getPoint() { return TS_Point(); }
+  TS_Point sample;
+  bool touched() { return sample.z > 0; }
+  TS_Point getPoint() { return sample; }
 };

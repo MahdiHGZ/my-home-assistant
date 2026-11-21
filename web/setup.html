@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coukab · Setup</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header class="topbar"><h1 id="setupTitle">Setup</h1><a href="/" class="pill" id="backHome">Home</a></header>
+<main><div class="content-grid"><section class="card"><h2 id="deviceTitle">Device settings</h2>
+<p id="instruction"></p><ul id="deviceSettings"></ul><button id="reloadSettings" class="pill">Reload device settings</button>
+<p id="setupStatus" role="status"></p></section><section class="card"><h2 id="addressTitle">Server addresses</h2><p id="addresses"></p></section>
+<section class="card"><h2>Home Assistant · MQTT</h2><p id="brokerStatus" role="status"></p>
+<form id="mqttSettings" hidden><label><input type="checkbox" id="shareEnabled"> <span id="enableText">Enable sharing</span></label>
+<fieldset><legend id="sensorLegend">Sensors</legend><div id="shareSensors"></div></fieldset>
+<fieldset><legend id="routineLegend">Routines</legend><div id="shareRoutines"></div></fieldset>
+<button class="pill" id="saveMqtt">Save</button></form></section></div></main>
+<script src="/static/setup.js"></script></body></html>

@@ -40,6 +40,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: python tuch_controller/render_preview.py
+      - run: PYTHONPATH=. python tests/panel_fixture.py | tuch_controller/tools/host_preview/build/preview --verify-status
 
   firmware-esp32:
     runs-on: ubuntu-latest
@@ -51,3 +52,19 @@ jobs:
       - run: pip install platformio
       - run: cp tuch_controller/secrets.h.example tuch_controller/secrets.h
       - run: platformio run
+
+  home-assistant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install uv==0.13.9 && uv sync --locked --no-dev
+      - run: python tests/integration/start_ha.py "$RUNNER_TEMP/coukab-ha"
+      - run: docker run -d --name coukab-mosquitto -p 127.0.0.1:1883:1883 -v "$RUNNER_TEMP/coukab-ha/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" eclipse-mosquitto:2
+      - run: docker run -d --network host --name coukab-ha -v "$RUNNER_TEMP/coukab-ha:/config" ghcr.io/home-assistant/home-assistant:2026.10.0
+      - run: PYTHONPATH=. .venv/bin/python tests/integration/home_assistant.py
+      - if: failure()
+        run: docker logs --tail 100 coukab-ha

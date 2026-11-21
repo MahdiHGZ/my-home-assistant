@@ -8,6 +8,7 @@ import os
 import threading
 import time
 import uuid
+from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,23 +29,28 @@ except ModuleNotFoundError as exc:
     Tapo = Any  # type: ignore[assignment]
     _PYTAPO_IMPORT_ERROR = exc
 
+import camera_policy
 from tooling import brain_tool
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_TAPO_IP = os.getenv("TAPO_IP", "")
-_TAPO_USERNAME = os.getenv("TAPO_USERNAME", "")
-_TAPO_PASSWORD = os.getenv("TAPO_PASSWORD", "")
-_TAPO_CLOUD_PASSWORD = os.getenv("TAPO_CLOUD_PASSWORD", "")
+_credentials = tuple(os.getenv(key, "") for key in ("TAPO_IP", "TAPO_USERNAME", "TAPO_PASSWORD", "TAPO_CLOUD_PASSWORD"))
+
+
+def credentials():
+    return _credentials
+
+
+def set_credentials(values):
+    global _credentials
+    _credentials = values
+
 
 MOMENTS_DIR = Path("moments")
 moments_lock = threading.Lock()
 _MAX_MOMENTS = 50
-
-_PRIVACY_DISABLE_WAIT_S = 3
-
 
 class TapoError(Exception):
     """Raised when a Tapo camera operation fails."""
@@ -70,18 +76,19 @@ def validate_config() -> None:
     Raises:
         TapoError: If any required variable is missing.
     """
+    host, user, password, _ = credentials()
     required = {
-        "TAPO_IP": _TAPO_IP,
-        "TAPO_USERNAME": _TAPO_USERNAME,
-        "TAPO_PASSWORD": _TAPO_PASSWORD,
+        "TAPO_IP": host,
+        "TAPO_USERNAME": user,
+        "TAPO_PASSWORD": password,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise TapoError(f"Missing environment variables: {', '.join(missing)}")
-    logger.info("Tapo config OK — IP: %s, User: %s", _TAPO_IP, _TAPO_USERNAME)
+    logger.info("Tapo config OK — IP: %s, User: %s", host, user)
 
 
-def get_client() -> Tapo:
+def get_client(config=None) -> Tapo:
     """Authenticates with the Tapo camera API.
 
     Tries camera-account credentials first, then falls back to cloud auth.
@@ -89,45 +96,56 @@ def get_client() -> Tapo:
     Raises:
         TapoError: If all authentication methods fail.
     """
+    host, user, password, cloud_password = config or credentials()
     _require_dependencies()
     try:
-        client = Tapo(_TAPO_IP, _TAPO_USERNAME, _TAPO_PASSWORD)
-        logger.info("Connected to Tapo API at %s (camera account).", _TAPO_IP)
+        client = Tapo(host, user, password)
+        logger.info("Connected to Tapo API at %s (camera account).", host)
         return client
     except Exception:
         logger.warning("Camera account auth failed — trying cloud fallback.")
 
-    if not _TAPO_CLOUD_PASSWORD:
+    if not cloud_password:
         raise TapoError("Auth failed. No TAPO_CLOUD_PASSWORD set for fallback.")
 
     try:
         client = Tapo(
-            _TAPO_IP, "admin", _TAPO_CLOUD_PASSWORD,
-            cloudPassword=_TAPO_CLOUD_PASSWORD,
+            host, "admin", cloud_password,
+            cloudPassword=cloud_password,
         )
-        logger.info("Connected to Tapo API at %s (cloud fallback).", _TAPO_IP)
+        logger.info("Connected to Tapo API at %s (cloud fallback).", host)
         return client
     except Exception as e:
         raise TapoError(f"All authentication methods failed: {e}") from e
 
 
-def ensure_camera_on(client: Tapo) -> None:
-    """Disables privacy mode if currently active.
+class CameraPrivateError(TapoError):
+    """Capture denied by the local policy or the camera's privacy mode."""
 
-    Raises:
-        TapoError: If privacy mode cannot be checked or toggled.
-    """
+
+class CameraPrivacyCheckError(CameraPrivateError):
+    """Capture denied because the camera's privacy state is unavailable."""
+
+
+def require_capture_allowed() -> None:
     try:
-        privacy = client.getPrivacyMode()
-        if privacy.get("enabled", "off") == "on":
-            logger.info("Privacy mode active — disabling.")
-            client.setPrivacyMode(False)
-            time.sleep(_PRIVACY_DISABLE_WAIT_S)
-            logger.info("Privacy mode disabled.")
-        else:
-            logger.debug("Camera already active.")
-    except Exception as e:
-        raise TapoError(f"Failed to manage privacy mode: {e}") from e
+        private = camera_policy.is_private(camera_policy.read(MOMENTS_DIR))
+    except (OSError, ValueError) as exc:
+        raise CameraPrivateError("Camera privacy settings are unreadable.") from exc
+    if private:
+        raise CameraPrivateError("Camera capture is blocked by the local privacy policy.")
+
+
+def ensure_camera_on(client: Tapo) -> None:
+    """Check the physical privacy mode without changing it."""
+    try:
+        enabled = client.getPrivacyMode().get("enabled")
+    except Exception as exc:
+        raise CameraPrivacyCheckError("Camera privacy mode could not be verified.") from exc
+    if enabled == "on":
+        raise CameraPrivateError("The camera reports privacy mode is enabled.")
+    if enabled != "off":
+        raise CameraPrivacyCheckError("The camera returned an unknown privacy state.")
 
 
 def connect(substream: bool = False) -> cv2.VideoCapture | None:
@@ -141,18 +159,32 @@ def connect(substream: bool = False) -> cv2.VideoCapture | None:
         An open VideoCapture, or None on failure.
     """
     _require_dependencies()
+    require_capture_allowed()
+    config = credentials()
+    host, user, password, _ = config
+    ensure_camera_on(get_client(config))
+    require_capture_allowed()
     stream = "stream2" if substream else "stream1"
-    rtsp_url = f"rtsp://{_TAPO_USERNAME}:{_TAPO_PASSWORD}@{_TAPO_IP}:554/{stream}"
-    logger.info("Connecting to camera at %s via RTSP (%s).", _TAPO_IP, stream)
-    cap = cv2.VideoCapture(rtsp_url)
+    rtsp_url = f"rtsp://{quote(user, safe='')}:{quote(password, safe='')}@{host}:554/{stream}"
+    logger.info("Connecting to camera at %s via RTSP (%s).", host, stream)
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG, [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000,
+    ])
     if not cap.isOpened():
+        cap.release()
         logger.error("RTSP connection failed. Check credentials and camera IP.")
         return None
+    try:
+        require_capture_allowed()
+    except CameraPrivateError:
+        cap.release()
+        raise
     logger.info("RTSP connected.")
     return cap
 
 
-def _atomic_imwrite(path: Path, frame) -> None:
+def _atomic_imwrite(path: Path, frame, *, capture: bool = False) -> None:
     """Encode beside the destination and publish only a complete image."""
     temp_path = path.parent / f".{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}"
     try:
@@ -160,6 +192,8 @@ def _atomic_imwrite(path: Path, frame) -> None:
             raise TapoError(f"Failed to encode image: {path}")
         if not temp_path.is_file() or temp_path.stat().st_size == 0:
             raise TapoError(f"Image encoder produced an empty file: {path}")
+        if capture:
+            require_capture_allowed()
         os.replace(temp_path, path)
     finally:
         try:
@@ -168,11 +202,22 @@ def _atomic_imwrite(path: Path, frame) -> None:
             pass
 
 
+def moment_caption_path(original: Path) -> Path:
+    return original.parent / f".{original.name}.caption"
+
+
+def delete_moment_derivatives(original: Path) -> None:
+    thumbs = original.parent / ".thumbs"
+    if not thumbs.is_symlink():
+        (thumbs / original.name).unlink(missing_ok=True)
+    moment_caption_path(original).unlink(missing_ok=True)
+
+
 def _prune_moments() -> None:
     files = sorted(
         (
             path for path in MOMENTS_DIR.iterdir()
-            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            if not path.name.startswith(".") and path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
         ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
@@ -180,7 +225,7 @@ def _prune_moments() -> None:
     for path in files[_MAX_MOMENTS:]:
         try:
             path.unlink(missing_ok=True)
-            (MOMENTS_DIR / ".thumbs" / path.name).unlink(missing_ok=True)
+            delete_moment_derivatives(path)
         except OSError as exc:
             logger.warning("Could not prune old moment %s: %s", path.name, exc)
 
@@ -192,11 +237,52 @@ def capture_moment(cap: cv2.VideoCapture) -> Path | None:
         Path to the saved file, or None on failure.
     """
     _require_dependencies()
-    ret, frame = cap.read()
-    if not ret:
+    frame = read_frame(cap)
+    if frame is None:
         logger.error("Failed to read frame from camera.")
         return None
-    with moments_lock:
+    return save_moment(frame)
+
+
+def read_frame(cap):
+    require_capture_allowed()
+    ok, frame = cap.read()
+    require_capture_allowed()
+    return frame if ok and frame is not None and frame.size else None
+
+
+def _write_thumbnail(path: Path, frame) -> None:
+    if path.parent.is_symlink():
+        raise OSError("Invalid thumbnail directory.")
+    h, w = frame.shape[:2]
+    size = (256, max(1, round(256 * h / w)))
+    thumbnail = cv2.resize(frame, size, interpolation=cv2.INTER_AREA) if w > 256 else frame
+    path.parent.mkdir(exist_ok=True)
+    _atomic_imwrite(path, thumbnail)
+
+
+def thumbnail_for(original: Path) -> Path:
+    """Called under moments_lock; fall back to the original if decoding fails."""
+    preview = original.parent / ".thumbs" / original.name
+    if preview.parent.is_symlink() or preview.is_symlink():
+        return original
+    if preview.is_file() and preview.stat().st_size:
+        return preview
+    if cv2 is None:
+        return original
+    try:
+        frame = cv2.imread(str(original))
+        if frame is None:
+            return original
+        _write_thumbnail(preview, frame)
+        return preview
+    except (OSError, TapoError, cv2.error):
+        return original
+
+
+def save_moment(frame) -> Path:
+    with camera_policy.lock, moments_lock:
+        require_capture_allowed()
         MOMENTS_DIR.mkdir(parents=True, exist_ok=True)
         (MOMENTS_DIR / ".thumbs").mkdir(exist_ok=True)
         filename = (
@@ -204,17 +290,11 @@ def capture_moment(cap: cv2.VideoCapture) -> Path | None:
             + f"-{uuid.uuid4().hex[:8]}.jpg"
         )
         filepath = MOMENTS_DIR / filename
-        _atomic_imwrite(filepath, frame)
+        _atomic_imwrite(filepath, frame, capture=True)
 
         # Thumbnail failure must not hide a successfully committed original.
         try:
-            thumb_path = MOMENTS_DIR / ".thumbs" / filename
-            h, w = frame.shape[:2]
-            scale = 256.0 / float(w)
-            thumb_frame = (
-                cv2.resize(frame, (256, int(h * scale))) if scale < 1.0 else frame
-            )
-            _atomic_imwrite(thumb_path, thumb_frame)
+            _write_thumbnail(MOMENTS_DIR / ".thumbs" / filename, frame)
         except Exception as exc:
             logger.warning("Thumbnail creation failed for %s: %s", filename, exc)
         _prune_moments()
@@ -279,16 +359,6 @@ def capture_moment_for_model(
         - captured_at: ISO timestamp.
         - media_input: Optional image content part for model input.
     """
-    # Best-effort: make sure privacy mode is off before opening the stream.
-    # Capture still proceeds if the control API is unreachable — the RTSP
-    # connect below reports the definitive failure.
-    try:
-        validate_config()
-        client = get_client()
-        ensure_camera_on(client)
-    except Exception as e:
-        logger.warning("Privacy-mode check skipped: %s", e)
-
     cap = connect()
     if not cap:
         raise TapoError("Unable to open RTSP stream for capture.")
@@ -363,7 +433,7 @@ def _brightness_label(mean: float) -> str:
     return "bright"
 
 
-def _detect_people(frame) -> tuple[int, int]:
+def _detect_people(frame, *, require_complete: bool = False) -> tuple[int, int]:
     """Approximate (people_count, face_count) using built-in OpenCV detectors.
 
     Runs on a downscaled frame for speed. Full-body HOG + frontal-face Haar —
@@ -381,7 +451,10 @@ def _detect_people(frame) -> tuple[int, int]:
             rects, _ = hog.detectMultiScale(small, winStride=(8, 8), padding=(8, 8), scale=1.05)
             people = len(rects)
         except Exception:
-            people = 0
+            if require_complete:
+                raise
+    elif require_complete:
+        raise TapoError("Person detector unavailable.")
 
     faces = 0
     casc = _get_face_cascade()
@@ -389,7 +462,10 @@ def _detect_people(frame) -> tuple[int, int]:
         try:
             faces = len(casc.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5))
         except Exception:
-            faces = 0
+            if require_complete:
+                raise
+    elif require_complete:
+        raise TapoError("Face detector unavailable.")
     return people, faces
 
 
@@ -449,20 +525,14 @@ def look_around() -> dict[str, object]:
         someone_present, changed_since_last, summary.
     """
     _require_dependencies()
-    # Best-effort: make sure privacy mode is off; capture proceeds regardless.
-    try:
-        ensure_camera_on(get_client())
-    except Exception as e:
-        logger.warning("Privacy-mode check skipped: %s", e)
-
     cap = connect(substream=True)   # low-res stream is plenty for scene facts
     if not cap:
         raise TapoError("Unable to open RTSP stream to look around.")
     try:
         frame = None
         for _ in range(5):          # flush stale buffered frames first
-            ok, f = cap.read()
-            if ok:
+            f = read_frame(cap)
+            if f is not None:
                 frame = f
     finally:
         cap.release()

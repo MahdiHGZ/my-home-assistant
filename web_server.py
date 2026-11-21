@@ -1,6 +1,6 @@
 """LAN web control interface for Coukab.
 
-A dependency-free HTTP server (Python standard library only) that serves a
+A standard-library HTTP server that serves a
 single-page UI and a small JSON API. It is started from ``main.py`` so the
 keypad listener and the web interface run from one process.
 
@@ -39,12 +39,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from action_errors import ActionCancelledError, ActionInProgressError, ActionQueueFullError
+import lighting_library
 from household import Household
 from worker import Worker
+from mqtt_bridge import Bridge
+import server_setup
 from receipts import ReceiptError, Receipts, accepted
 from device_actions import ACTIONS, describe
+import camera_features
+import camera_policy
 import tapo_camera_utils as tapo
 import tuch_controller_utils as panel
+from cleaning_air import CleaningAir
+from xiaomi_details import DetailError, XiaomiDetails
 import xiaomi_airpurifier_utils as purifier
 import xiaomi_vacuum_utils as vacuum
 import yeelight_bulb_utils as yeelight
@@ -363,6 +370,15 @@ def _safe(fn) -> dict:
         return {"available": False, "error": str(e)}
 
 
+def _xiaomi_details_response(reader) -> dict:
+    try:
+        return reader()
+    except DetailError:
+        return {"available": False, "reason": "unsupported"}
+    except Exception:
+        return {"available": False, "reason": "offline"}
+
+
 def _lights_status() -> dict:
     res = yeelight.control_bulbs()
     return {
@@ -469,8 +485,13 @@ def _moment_files() -> list[Path]:
 def _moments_summary() -> dict:
     files = _moment_files()
     recent = [f"/moments/{p.name}" for p in files[:12]]
+    try:
+        latest_at = files[0].stat().st_mtime if files else None
+    except FileNotFoundError:
+        latest_at = None
     return {
         "count": len(files),
+        "latest_at": latest_at,
         "latest": recent[0] if recent else None,
         "recent": recent,
     }
@@ -483,15 +504,14 @@ def _resolve_moment(name: str, thumb: bool = False) -> Path:
     """
     moments_dir = Path(tapo.MOMENTS_DIR).resolve()
     
-    path = (moments_dir / ".thumbs" / name).resolve() if thumb else (moments_dir / name).resolve()
-    if thumb and not path.is_file():
-        path = (moments_dir / name).resolve()
-
-    if moments_dir not in path.parents:
+    if name.startswith(".") or "/" in name or "\\" in name:
+        raise _ApiError("Invalid file name.", status=400)
+    path = (moments_dir / name).resolve()
+    if path.parent != moments_dir:
         raise _ApiError("Invalid file name.", status=400)
     if path.suffix.lower() not in {".jpg", ".jpeg", ".png"} or not path.is_file():
         raise _ApiError("No such image.", status=404)
-    return path
+    return tapo.thumbnail_for(path) if thumb else path
 
 
 def _delete_moment(name: str) -> None:
@@ -499,9 +519,7 @@ def _delete_moment(name: str) -> None:
     with tapo.moments_lock:
         path = _resolve_moment(name)
         path.unlink()
-        thumb_path = path.parent / ".thumbs" / path.name
-        if thumb_path.exists():
-            thumb_path.unlink()
+        tapo.delete_moment_derivatives(path)
     logger.info("Moment deleted via web: %s", path.name)
 
 
@@ -641,18 +659,18 @@ def _panel_moment_rgb565(name: str | None, w: int, h: int) -> bytes:
     """Renders a moment to raw big-endian RGB565 (w*h*2 bytes) for the TFT."""
     import cv2          # lazy: heavy import, already a project dependency
 
-    if name:
-        path = _resolve_moment(name.rsplit("/", 1)[-1])
-    else:
+    if not name:
         files = _moment_files()
         if not files:
             raise _ApiError("No moments captured yet.", status=404)
-        path = files[0]
+        name = files[0].name
 
     w = max(16, min(320, w))
     h = max(16, min(240, h))
 
-    img = cv2.imread(str(path))  # BGR
+    with tapo.moments_lock:
+        path = _resolve_moment(name.rsplit("/", 1)[-1], thumb=True)
+        img = cv2.imread(str(path))
     if img is None:
         raise _ApiError("Could not decode image.", status=500)
     img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
@@ -734,8 +752,12 @@ def _capabilities() -> dict:
         "actions": [{"device": a.device, "action": a.name, "fields": a.fields} for a in ACTIONS.values()],
         "color_cycle": list(yeelight.COLOR_CYCLE),
         "scene_modes": [
-            {"key": k, "name": yeelight.MODES[k].name}
-            for k in _SCENE_MODE_KEYS if k in yeelight.MODES
+            {
+                "key": k, "name": mode.name, "brightness": mode.brightness,
+                "color": ("#%02x%02x%02x" % mode.color if mode.color is not None
+                          else str(mode.color_temp) if mode.color_temp is not None else None),
+            }
+            for k in _SCENE_MODE_KEYS if (mode := yeelight.MODES.get(k)) is not None
         ],
         "dance_patterns": [p.name for p in yeelight.DANCE_PATTERNS],
         "suction_levels": _enum_options(vacuum.SuctionLevel),
@@ -807,6 +829,36 @@ def _int_field(
     if allowed is not None and value not in allowed:
         raise _ApiError(f"'{key}' is not an allowed value.")
     return value
+
+
+def _lighting_library_mutation(store, controller, path, body):
+    operation = path.rsplit("/", 1)[-1]
+    if operation not in {"save", "delete", "recall"}:
+        raise _ApiError("Not found.", status=404)
+    name = _string_field(body, "name").strip()
+    if not 1 <= len(name) <= 64:
+        raise _ApiError("Use a name with 1–64 characters.")
+    try:
+        if operation == "recall":
+            _reject_unknown(body, {"name"})
+            return controller.run_action(lighting_library.recall_scene, store, name, retry=False, publish_result=True)
+        kind = body.get("kind")
+        if kind not in ("group", "scene"):
+            raise _ApiError("Invalid lighting collection type.")
+        if operation == "delete":
+            _reject_unknown(body, {"name", "kind"})
+            return lighting_library.delete_entry(store, kind, name)
+        _reject_unknown(body, {"name", "kind", "bulbs"})
+        bulbs = body.get("bulbs")
+        if not isinstance(bulbs, list) or not bulbs or not all(
+            isinstance(bulb, str) and bulb for bulb in bulbs
+        ) or len(set(bulbs)) != len(bulbs):
+            raise _ApiError("Select at least one unique bulb.")
+        if kind == "scene":
+            return controller.run_action(lighting_library.save_entry, store, kind, name, bulbs, retry=False, publish_result=True)
+        return lighting_library.save_entry(store, kind, name, bulbs)
+    except ValueError as exc:
+        raise _ApiError(str(exc)) from exc
 
 
 def _lights_action(controller, body: dict) -> dict:
@@ -889,6 +941,8 @@ def _camera_capture(controller, body: dict) -> dict:
         flash = False
     try:
         captured = controller.capture(flash=flash)
+    except tapo.CameraPrivateError as e:
+        raise _ApiError(str(e), status=409) from e
     except (ActionCancelledError, ActionInProgressError, ActionQueueFullError):
         raise
     except Exception as e:
@@ -986,6 +1040,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_camera_media(self, data: bytes, content_type: str, download: str | None = None) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, no-store")
+        if download:
+            self.send_header("Content-Disposition", f'attachment; filename="{download}"')
         self.end_headers()
         self.wfile.write(data)
 
@@ -1229,9 +1293,29 @@ class _Handler(BaseHTTPRequestHandler):
             elif path in _ROOT_STATIC:
                 self._serve_static(_ROOT_STATIC[path])
             elif path == "/api/capabilities":
-                self._send_json(_capabilities())
+                caps = _capabilities()
+                keypad = getattr(self._controller, "keypad_bindings", None)
+                if callable(keypad):
+                    caps["keypad"] = keypad()
+                self._send_json(caps)
+            elif path == "/setup":
+                self._serve_static("setup.html")
+            elif path == "/api/setup":
+                address = self.server.advertisement
+                self._send_json({"missing": {} if self.server.demo else server_setup.configuration(),
+                                 "demo": self.server.demo, "watch": self.server.watch_assets,
+                                 "local_url": address.local_url if address else None,
+                                 "manual_url": f"http://{address.current_address()}:{self.server.server_port}/" if address else None})
+            elif path == "/api/dev-assets" and self.server.watch_assets:
+                fingerprints = sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
+                                      for f in WEB_DIR.iterdir() if f.is_file())
+                self._send_json({"revision": hashlib.sha256(repr(fingerprints).encode()).hexdigest()})
+            elif path == "/api/mqtt" and self.server.mqtt:
+                self._send_json(self.server.mqtt.settings())
             elif path == "/api/health":
                 self._send_json({"ok": True, "status": "running"})
+            elif path == "/api/lights/library":
+                self._send_json(lighting_library.list_entries(self.server.household, yeelight.load_registered_bulbs()))
             elif path == "/api/history":
                 self._send_json(self.server.household.history())
             elif path == "/api/routines":
@@ -1255,10 +1339,32 @@ class _Handler(BaseHTTPRequestHandler):
                 self._serve_panel_alert_img(query)
             elif path == "/api/events":
                 self._serve_events()
+            elif path == "/api/vacuum/details":
+                self._send_json(_xiaomi_details_response(self.server.xiaomi_details.vacuum))
+            elif path == "/api/purifier/details":
+                self._send_json(_xiaomi_details_response(self.server.xiaomi_details.purifier))
+            elif path == "/api/cleaning-air":
+                self._send_json(self.server.cleaning_air.status())
             elif path == "/api/vacuum/consumables":
                 self._send_json(_safe(_vacuum_consumables))
             elif path == "/api/vacuum/rooms":
                 self._send_json(_safe(_vacuum_rooms))
+            elif path == "/api/camera/settings":
+                self._send_json(self.server.camera_jobs.status(camera_policy.read(tapo.MOMENTS_DIR)))
+            elif path == "/api/camera/ptz":
+                self._send_json(camera_features.ptz_probe())
+            elif path == "/api/camera/timelapse.zip":
+                self._send_camera_media(self.server.camera_jobs.export_timelapse(), "application/zip",
+                                        "coukab-timelapse.zip")
+            elif path == "/api/camera/digest":
+                settings = camera_policy.read(tapo.MOMENTS_DIR)
+                if not settings["daily_digest"]:
+                    raise _ApiError("Daily camera digest is disabled.", status=409)
+                history = self.server.household.history() if self.server.household else {"actions": []}
+                self._send_json(camera_features.daily_digest(_moment_files(), history))
+            elif path == "/api/camera/search":
+                query = parse_qs(self.path.partition("?")[2]).get("q", [""])[0][:240]
+                self._send_json({"matches": camera_features.gallery_search(_moment_files(), query)})
             elif path == "/api/moments":
                 self._send_json(_moments_summary())
             elif path.startswith("/api/actions/"):
@@ -1343,20 +1449,60 @@ class _Handler(BaseHTTPRequestHandler):
         if self.server.stopped.is_set():
             return 503, {"ok": False, "error": "Service is stopping."}
         try:
+            if path == "/api/setup/reload":
+                _reject_unknown(body, set())
+                if self.server.demo:
+                    raise _ApiError("Demo configuration is simulated.")
+                try:
+                    # A remote drive lease owns its device until STOP/expiry.
+                    with _vacuum_action_lock:
+                        if _drive.timer is not None:
+                            raise _ApiError("Finish remote driving before reloading.", status=409)
+                        changed = server_setup.reload_devices()
+                except ValueError as exc:
+                    raise _ApiError(str(exc)) from exc
+                notify_status_changed()
+                return 200, {"ok": True, "updated": changed}
+            if path == "/api/mqtt" and self.server.mqtt:
+                try:
+                    return 200, self.server.mqtt.configure(body)
+                except ValueError as exc:
+                    raise _ApiError(str(exc)) from exc
+            if path.startswith("/api/lights/library/"):
+                return 200, _lighting_library_mutation(self.server.household, self._controller, path, body)
             if path in {"/api/routines/save", "/api/routines/delete", "/api/routines/run"}:
                 try:
                     if path.endswith("/save"):
                         _reject_unknown(body, {"name", "steps", "schedule"})
                         self.server.household.save(body)
+                        if self.server.mqtt:
+                            self.server.mqtt.changed.set()
                         return 200, {"ok": True}
                     _reject_unknown(body, {"name"})
                     name = _string_field(body, "name")
                     if path.endswith("/delete"):
                         self.server.household.delete(name)
+                        if self.server.mqtt:
+                            self.server.mqtt.forget_routine(name)
                         return 200, {"ok": True}
                     result = self._controller.run_action(self.server.run_routine, name, lane=self.server.routine_worker,
                                                          retry=False, publish_result=True, timeout=2)
                     return 200, result
+                except ValueError as exc:
+                    raise _ApiError(str(exc)) from exc
+            if path == "/api/vacuum/details":
+                try:
+                    with _vacuum_action_lock:
+                        self.server.xiaomi_details.change(body)
+                except DetailError as exc:
+                    raise _ApiError(str(exc), status=409) from exc
+                except Exception as exc:
+                    raise _ApiError("Vacuum settings unavailable.", status=502) from exc
+                notify_status_changed()
+                return 200, {"ok": True}
+            if path == "/api/cleaning-air":
+                try:
+                    return 200, self.server.cleaning_air.configure(body)
                 except ValueError as exc:
                     raise _ApiError(str(exc)) from exc
             if path == "/api/lights/action":
@@ -1369,6 +1515,47 @@ class _Handler(BaseHTTPRequestHandler):
                 result = _purifier_action(body)
             elif path == "/api/camera/capture":
                 result = _camera_capture(self._controller, body)
+            elif path == "/api/camera/preview":
+                _reject_unknown(body, set())
+                try:
+                    data = camera_features.preview()
+                except tapo.CameraPrivateError as e:
+                    raise _ApiError(str(e), status=409) from e
+                except tapo.TapoError as e:
+                    raise _ApiError("Camera preview unavailable.", status=502) from e
+                return 200, {"ok": True, "jpeg": base64.b64encode(data).decode("ascii")}
+            elif path == "/api/camera/ptz":
+                try:
+                    camera_features.move_camera(body)
+                except (ValueError, tapo.CameraPrivateError) as e:
+                    raise _ApiError(str(e), status=409) from e
+                result = {"ok": True}
+            elif path == "/api/camera/sweep":
+                _reject_unknown(body, {"presets"})
+                try:
+                    self.server.camera_jobs.start_sweep(body.get("presets"))
+                except (ValueError, tapo.CameraPrivateError) as e:
+                    raise _ApiError(str(e), status=409) from e
+                result = {"ok": True}
+            elif path == "/api/camera/sweep/cancel":
+                _reject_unknown(body, set())
+                self.server.camera_jobs.cancel_sweep()
+                result = {"ok": True}
+            elif path == "/api/camera/settings":
+                try:
+                    camera_policy.write(tapo.MOMENTS_DIR, body)
+                except ValueError as e:
+                    raise _ApiError(str(e)) from e
+                result = self.server.camera_jobs.status(body)
+            elif path == "/api/camera/caption":
+                _reject_unknown(body, {"name", "caption"})
+                name = _string_field(body, "name")
+                caption = body.get("caption")
+                if not isinstance(caption, str) or len(caption) > 240:
+                    raise _ApiError("Caption must be text up to 240 characters.")
+                with tapo.moments_lock:
+                    camera_features.set_caption(_resolve_moment(name), caption.strip())
+                result = {"ok": True}
             elif path == "/api/camera/delete":
                 result = _camera_delete(body)
             elif path == "/api/panel/alert":
@@ -1396,7 +1583,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 _RETRIABLE = {"/api/lights/action", "/api/lights/control", "/api/purifier/action",
-              "/api/vacuum/action", "/api/camera/capture", "/api/camera/delete", "/api/routines/run"}
+              "/api/vacuum/action", "/api/camera/capture", "/api/camera/delete", "/api/routines/run",
+              "/api/lights/library/recall", "/api/lights/library/save"}
 
 
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -1406,15 +1594,39 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self.household = None
+        self.xiaomi_details = XiaomiDetails()
+        self.cleaning_air = None
+        self.cleaning_air_thread = None
         self.scheduler = None
         self.sampler = None
         self.receipts = Receipts()
+        self.mqtt = None
+        self.advertisement = None
+        self.watch_assets = self.demo = False
         self.stopped = threading.Event()
+        self.camera_jobs = camera_features.CameraJobs(self.stopped, notify_status_changed, self.camera_presence)
         self.notifier = None
         self.credentials = _credentials()
         self._handler_slots = threading.BoundedSemaphore(_MAX_HANDLER_THREADS)
         super().__init__(*args, **kwargs)
         self.routine_worker = Worker("household-routines", 32)
+
+    def camera_presence(self, rule):
+        if self.stopped.is_set():
+            return
+        start = time.monotonic()
+        action = "lights/power" if rule == "lights_on" else "vacuum/pause"
+        outcome = "failed"
+        try:
+            if rule == "lights_on":
+                if not _lights_control(self.controller, {"power": True})["ok"]:
+                    raise RuntimeError("Camera presence lighting action failed.")
+            elif rule == "vacuum_pause":
+                _vacuum_action({"action": "pause"})
+            outcome = "done"
+        finally:
+            if self.household:
+                self.household.record_safely("camera", action, outcome, time.monotonic() - start)
 
     def run_routine(self, name, local_time=None):
         def execute(step):
@@ -1462,20 +1674,37 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
                 logger.exception("Could not queue scheduled routines")
             self.stopped.wait(1)
 
+    def cleaning_air_loop(self):
+        while not self.stopped.is_set():
+            try:
+                self.cleaning_air.poll()
+            except Exception:
+                logger.exception("Could not check cleaning air coordination")
+            self.stopped.wait(5)
+
     def sample_loop(self):
         while not self.stopped.is_set():
             try:
                 snapshot = _cached_status(self.controller)
                 self.household.sample(snapshot.get("purifier", {}), time.time())
+                if self.mqtt:
+                    self.mqtt.publish_state(snapshot)
             except Exception:
                 logger.exception("Could not record environmental sample")
             self.stopped.wait(60)
 
     def shutdown(self):
         self.stopped.set()
+        self.camera_jobs.cancel_sweep()
         _status_dirty.set()
         self.routine_worker.stop()
         super().shutdown()
+        if self.mqtt:
+            self.mqtt.close()
+        if self.advertisement and self.advertisement.thread.is_alive():
+            self.advertisement.thread.join(timeout=0.5)
+        if self.cleaning_air_thread:
+            self.cleaning_air_thread.join(timeout=0.25)
         if self.notifier:
             drive_stop = threading.Thread(target=_drive.stop_on_shutdown, name="drive-stop", daemon=True)
             drive_stop.start()
@@ -1522,7 +1751,7 @@ def lan_ip() -> str:
             return "127.0.0.1"
 
 
-def start(controller, host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServer:
+def start(controller, host: str = "0.0.0.0", port: int = 8080, *, demo=False, watch_assets=False) -> ThreadingHTTPServer:
     """Bind and start the web server in a background thread; returns the server."""
     global _controller_ref
     httpd = _BoundedThreadingHTTPServer((host, port), _Handler)
@@ -1531,10 +1760,20 @@ def start(controller, host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPS
 
     httpd.household = getattr(controller, "household", None) or Household(os.getenv("COUKAB_STATE_DB", "coukab.sqlite3"))
     httpd.household.recover()
+    httpd.demo, httpd.watch_assets = demo, watch_assets
+    httpd.advertisement = server_setup.Advertisement(httpd, lan_ip)
+    if not demo and not host.startswith("127.") and os.getenv("COUKAB_MDNS", "1") == "1":
+        httpd.advertisement.thread.start()
+    httpd.mqtt = Bridge(httpd)
+    httpd.mqtt.start()
+    httpd.cleaning_air = CleaningAir(httpd.household, notify_status_changed)
+    httpd.cleaning_air_thread = threading.Thread(target=httpd.cleaning_air_loop, name="cleaning-air", daemon=True)
+    httpd.cleaning_air_thread.start()
     httpd.scheduler = threading.Thread(target=httpd.schedule_loop, name="scheduler", daemon=True)
     httpd.sampler = threading.Thread(target=httpd.sample_loop, name="environment-sampler", daemon=True)
     httpd.scheduler.start()
     httpd.sampler.start()
+    threading.Thread(target=httpd.camera_jobs.run, name="camera-jobs", daemon=True).start()
 
     # Live updates: every completed controller job (keypad or web) triggers a
     # debounced status push to all SSE subscribers.
@@ -1547,6 +1786,6 @@ def start(controller, host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPS
     threading.Thread(target=httpd.serve_forever, name="web-server", daemon=True).start()
     logger.info(
         "Web interface: http://%s:%d  (open http://%s:%d on your phone).",
-        host, port, lan_ip(), port,
+        host, httpd.server_port, lan_ip(), httpd.server_port,
     )
     return httpd

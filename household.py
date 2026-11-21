@@ -25,6 +25,9 @@ class Household:
                 CREATE TABLE IF NOT EXISTS routines (
                     name TEXT PRIMARY KEY, steps TEXT, schedule TEXT
                 );
+                CREATE TABLE IF NOT EXISTS lighting_library (
+                    kind TEXT, name TEXT, data TEXT, PRIMARY KEY(kind, name)
+                );
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY, name TEXT, local_date TEXT, ts REAL, outcomes TEXT,
                     UNIQUE(name, local_date)

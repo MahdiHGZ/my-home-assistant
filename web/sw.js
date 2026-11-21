@@ -2,8 +2,8 @@
    API and camera images are always network-only. */
 "use strict";
 
-const VERSION = "coukab-v9";
-const SHELL = ["/", "/static/style.css", "/static/app.js", "/manifest.webmanifest", "/icon.svg"];
+const VERSION = "coukab-v10";
+const SHELL = ["/", "/static/style.css", "/static/app.js", "/static/camera.js", "/static/dashboard.js", "/static/xiaomi.js", "/static/setup.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(
@@ -14,7 +14,7 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("coukab-") && k !== VERSION).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

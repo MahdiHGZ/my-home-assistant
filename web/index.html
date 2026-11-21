@@ -24,31 +24,75 @@
     </div>
     <div class="topbar-right">
       <span class="live"><span id="liveDot" class="live-dot"></span><span id="liveText" data-i18n="live">live</span></span>
+      <a href="/setup" id="setupLink" class="pill">Setup</a>
       <button id="langBtn" class="icon-btn lang-btn" aria-label="Toggle language">FA</button>
       <button id="refreshBtn" class="icon-btn" aria-label="Refresh status"><i data-icon="refresh"></i></button>
     </div>
   </header>
 
   <main>
+    <section class="card" id="overviewAttention" aria-labelledby="attentionTitle" hidden>
+      <h2 id="attentionTitle" data-i18n="attention">Needs attention</h2>
+      <ul id="attentionList"></ul>
+    </section>
     <div class="sidebar-column">
       <!-- Dashboard -->
       <section class="grid dashboard">
         <article class="card stat" id="statLights">
           <div class="stat-icon" data-icon="bulb"></div>
           <div class="stat-body"><h3 data-i18n="lights">Lights</h3><p class="stat-line">—</p></div>
+          <div class="btn-row wrap overview-actions">
+            <button class="pill" id="overviewScene"></button>
+            <button class="pill" data-overview-device="lights" data-i18n="details">Details</button>
+          </div>
         </article>
         <article class="card stat" id="statVacuum">
           <div class="stat-icon" data-icon="vacuum"></div>
           <div class="stat-body"><h3 data-i18n="vacuum">Vacuum</h3><p class="stat-line">—</p></div>
+          <div class="btn-row wrap overview-actions">
+            <button class="pill" id="overviewPause" data-vac="pause" data-i18n="pause">Pause</button>
+          <button class="pill" id="overviewDock" data-vac="dock" data-i18n="dock">Dock</button>
+            <button class="pill" data-overview-device="vacuum" data-i18n="details">Details</button>
+          </div>
         </article>
         <article class="card stat" id="statAir">
           <div class="stat-icon" data-icon="wind"></div>
           <div class="stat-body"><h3 data-i18n="air">Air</h3><p class="stat-line">—</p></div>
+          <div class="btn-row wrap overview-actions">
+            <button class="pill" id="overviewAirPower" data-air-power="on"></button>
+            <button class="pill" data-overview-device="air" data-i18n="details">Details</button>
+          </div>
         </article>
         <article class="card stat" id="statCamera">
           <div class="stat-icon" data-icon="camera"></div>
           <div class="stat-body"><h3 data-i18n="camera">Camera</h3><p class="stat-line">—</p></div>
+          <div class="btn-row wrap overview-actions">
+            <button class="pill" data-overview-device="camera" data-i18n="details">Details</button>
+          </div>
         </article>
+      </section>
+
+      <section class="card" id="cleaningAirCard">
+        <details id="cleaningAirDetails">
+          <summary data-xiaomi="coordination">Vacuum and air purifier routine</summary>
+          <p id="cleaningAirState" aria-live="polite"></p>
+          <form id="cleaningAirForm" hidden>
+            <div class="control-row">
+              <label><span data-xiaomi="mode">Purifier mode</span><select name="mode">
+                <option value="auto" data-xiaomi="auto">Auto</option>
+                <option value="sleep" data-xiaomi="sleep">Sleep</option>
+                <option value="favorite" data-xiaomi="favorite">Favorite</option>
+              </select></label>
+              <label><span data-xiaomi="seconds">Settling time (seconds)</span>
+                <input type="number" name="seconds" min="0" max="3600" step="1" required>
+              </label>
+            </div>
+            <p id="cleaningAirPreview"></p>
+            <label><input type="checkbox" name="enabled"> <span data-xiaomi="enable">Enable routine</span></label>
+            <button type="submit" class="pill" data-xiaomi="save">Save</button>
+          </form>
+        </details>
+        <p id="cleaningAirSummary" class="readout"></p>
       </section>
 
       <section class="card" id="routinesCard">
@@ -69,6 +113,47 @@
           </form>
         </details>
         <details id="runHistory"><summary data-i18n="recent_runs">Recent runs</summary><div id="runResults"></div></details>
+      </section>
+
+      <section class="card" id="roomCard">
+        <div class="card-head"><h2 data-i18n="rooms">Rooms</h2></div>
+        <details id="roomSetup">
+          <summary data-i18n="floorplan_setup">Set up floor plan</summary>
+          <label><span data-i18n="floorplan_image">Floor plan image</span>
+            <input id="floorplanInput" type="file" accept="image/png,image/jpeg,image/webp" />
+          </label>
+          <button class="pill" id="floorplanClear" data-i18n="remove_image">Remove image</button>
+          <p class="hint" data-i18n="floorplan_hint">Drag a marker or use the position fields in the device list.</p>
+        </details>
+        <div id="roomMap" hidden><img id="floorplanImage" alt="" draggable="false" /><div id="roomMarkers"></div></div>
+        <label><span data-i18n="room_filter">Show room</span> <select id="roomFilter"></select></label>
+        <ul id="roomDeviceList"></ul>
+      </section>
+      <section class="card" id="preferencesCard">
+        <div class="card-head"><h2 data-i18n="preferences">Dashboard settings</h2></div>
+        <div class="control-row">
+          <label><span data-i18n="theme">Theme</span>
+            <select id="dashboardTheme">
+              <option value="system" data-i18n="theme_system">System</option>
+              <option value="light" data-i18n="theme_light">Light</option>
+              <option value="dark" data-i18n="theme_dark">Dark</option>
+            </select>
+          </label>
+        </div>
+        <div class="dashboard-options">
+          <label><input type="checkbox" id="bulbAccent" /> <span data-i18n="bulb_accent">Use active bulb color as accent</span></label>
+          <label><input type="checkbox" id="timeOrder" /> <span data-i18n="time_order">Order cards by time of day</span></label>
+        </div>
+        <details id="keyMap">
+          <summary data-i18n="key_map">Keyboard shortcuts and keypad map</summary>
+          <div id="keyMapPrint">
+            <h3 data-i18n="dashboard_keys">Dashboard shortcuts</h3>
+            <ul id="dashboardKeys"></ul>
+            <h3 data-i18n="physical_keys">Physical keypad</h3>
+            <ul id="physicalKeys"></ul>
+          </div>
+          <button class="pill" id="printKeyMap" data-i18n="print_keys">Print key map</button>
+        </details>
       </section>
 
       <!-- Touch-panel alert -->
@@ -101,6 +186,17 @@
 
         <div class="subhead" data-i18n="scenes">Scenes</div>
         <div id="sceneBtns" class="btn-row wrap"></div>
+
+        <details id="lightingLibrary">
+          <summary data-i18n="lighting_library">Groups and favorite scenes</summary>
+          <div id="lightingEntries"></div>
+          <form id="lightingLibraryForm">
+            <label><span data-i18n="routine_name">Name</span> <input id="lightingName" maxlength="64" required /></label>
+            <button class="pill" type="submit" value="group" data-i18n="save_group">Save group</button>
+            <button class="pill" type="submit" value="scene" data-i18n="save_scene">Save current scene</button>
+            <p class="hint" data-i18n="library_hint">Saves the selected bulbs, or all when none are selected.</p>
+          </form>
+        </details>
 
         <div class="subhead" data-i18n="brightness">Brightness</div>
         <div class="slider-row">
@@ -189,6 +285,12 @@
           <button class="dpad-btn down" data-vac-remote="4" aria-label="Drive backward"><i data-icon="chevron-down"></i></button>
         </div>
 
+        <details id="s20Details" class="maint">
+          <summary data-xiaomi="vacSettings">S20 advanced settings</summary>
+          <p class="readout" aria-live="polite"></p>
+          <div class="xiaomi-fields"></div>
+        </details>
+
         <details id="maintDetails" class="maint">
           <summary><i data-icon="sliders"></i> <span data-i18n="maintenance">Maintenance</span></summary>
           <div id="maintBody" class="readout"><span class="hint" data-i18n="loading">Loading…</span></div>
@@ -199,6 +301,12 @@
       <section class="card" id="airCard">
         <div class="card-head"><h2><i data-icon="wind"></i> <span data-i18n="air_purifier">Air purifier</span></h2></div>
         <div id="airReadout" class="readout">—</div>
+
+        <details id="purifierDetails" class="maint">
+          <summary data-xiaomi="airMaintenance">Purifier filter and motor readings</summary>
+          <p class="readout" aria-live="polite"></p>
+          <dl class="xiaomi-fields"></dl>
+        </details>
 
         <details id="airHistory">
           <summary data-i18n="air_history">Air quality over 24 hours</summary>
@@ -239,6 +347,7 @@
           <button class="pill" id="captureBtn"><i data-icon="camera"></i> <span data-i18n="capture">Capture</span></button>
           <button class="pill" id="captureFlashBtn"><i data-icon="zap"></i> <span data-i18n="capture_flash">Capture + flash</span></button>
         </div>
+        <div id="cameraTools"></div>
         <div id="momentLatest" class="moment-latest"></div>
         <div id="momentGallery" class="gallery"></div>
       </section>
@@ -273,13 +382,24 @@
       <span class="nav-icon"><i data-icon="camera"></i></span>
       <span class="nav-text" data-i18n="camera">Camera</span>
     </button>
+    <button class="nav-tab" data-tab="rooms" aria-label="Rooms">
+      <span class="nav-icon"><i data-icon="home"></i></span>
+      <span class="nav-text" data-i18n="rooms">Rooms</span>
+    </button>
     <button class="nav-tab hidden" data-tab="chat" aria-label="Assistant">
       <span class="nav-icon"><i data-icon="chat"></i></span>
       <span class="nav-text" data-i18n="khatoon">Khatoon</span>
     </button>
   </nav>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast">
+    <div id="toastStatus" class="toast" role="status" aria-live="polite"></div>
+    <div id="toastAction" class="toast" hidden></div>
+  </div>
+  <script src="/static/dashboard.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/setup.js"></script>
+  <script src="/static/xiaomi.js"></script>
+  <script src="/static/camera.js"></script>
 </body>
 </html>
