@@ -84,6 +84,8 @@ class CaptureDurabilityTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.is_file())
         self.assertTrue(second.is_file())
+        self.assertEqual(first.stat().st_mode & 0o077, 0)
+        self.assertEqual((first.parent / ".thumbs" / first.name).stat().st_mode & 0o077, 0)
 
     def test_failed_encode_never_publishes_destination(self):
         destination = tapo.MOMENTS_DIR / "broken.jpg"

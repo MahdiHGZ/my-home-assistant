@@ -62,7 +62,7 @@ def read(directory: Path) -> dict:
 def write(directory: Path, settings: dict) -> None:
     validate(settings)
     with lock:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=directory, prefix=".camera-", delete=False
         ) as output:

@@ -27,11 +27,12 @@ import os
 import queue
 import shutil
 import socket
+import sys
 import threading
 import time
 import uuid
 from datetime import datetime
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, urlsplit
 
 from dotenv import load_dotenv
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -1024,6 +1025,20 @@ def _credentials():
             for name in ("browser", "panel")}
 
 
+def _configured_origins():
+    origins, hosts = set(), set()
+    for value in os.getenv("COUKAB_ALLOWED_ORIGINS", "").split(","):
+        if not value.strip():
+            continue
+        origin = urlsplit(value.strip().lower())
+        if (origin.scheme not in {"http", "https"} or not origin.hostname or origin.username is not None
+                or origin.path not in {"", "/"} or origin.query or origin.fragment):
+            raise ValueError("COUKAB_ALLOWED_ORIGINS requires HTTP or HTTPS origins.")
+        origins.add(f"{origin.scheme}://{origin.netloc}")
+        hosts.add(origin.netloc)
+    return origins, hosts
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "Coukab/1.0"
     protocol_version = "HTTP/1.1"
@@ -1036,8 +1051,13 @@ class _Handler(BaseHTTPRequestHandler):
     def _controller(self):
         return self.server.controller  # type: ignore[attr-defined]
 
+    def log_request(self, code="-", size="-"):
+        # Query strings include household search terms and gallery filenames.
+        path = getattr(self, "path", "").partition("?")[0]
+        logger.debug("web %s %r %s", self.command, path, code)
+
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - base API
-        logger.debug("web %s - %s", self.address_string(), fmt % args)
+        logger.debug("web protocol error from %s", self.address_string())
 
     # -- response helpers --
     def _send_json(self, payload: dict, status: int = 200) -> None:
@@ -1062,7 +1082,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "private, no-store")
         if download:
-            self.send_header("Content-Disposition", f'attachment; filename="{download}"')
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(download, safe=""))
         self.end_headers()
         self.wfile.write(data)
 
@@ -1119,6 +1139,9 @@ class _Handler(BaseHTTPRequestHandler):
         tags = [tag.strip().removeprefix("W/") for tag in self.headers.get("If-None-Match", "").split(",")]
         current = etag in tags or "*" in tags
         self.send_response(304 if current else 200)
+        if path.suffix == ".html":
+            self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("ETag", etag)
         self.send_header("Cache-Control", "private, no-cache")
         if compressible:
@@ -1133,11 +1156,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def _send_rgb565(self, data: bytes) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._send_camera_media(data, "application/octet-stream")
 
     @staticmethod
     def _query_dims(query: str, dw: int, dh: int) -> tuple[int, int]:
@@ -1248,27 +1267,29 @@ class _Handler(BaseHTTPRequestHandler):
             path = _resolve_moment(filename, thumb=thumb)
             content_type = _STATIC_TYPES.get(path.suffix.lower(), "application/octet-stream")
             data = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        # Timestamped file names are immutable, so allow caching.
-        self.send_header("Cache-Control", "private, no-store" if any(self.server.credentials.values()) else "private, max-age=86400")
-        if download:
-            self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
-        self.end_headers()
-        self.wfile.write(data)
+        self._send_camera_media(data, content_type, path.name if download else None)
 
     def _authorize(self):
+        self.principal = None
         if self.server.stopped.is_set():
             self.close_connection = True
             self._send_json({"error": "Service is stopping."}, status=503)
             return False
-        origin = self.headers.get("Origin")
-        if self.command == "POST" and origin:
-            allowed = {value.strip() for value in os.getenv("COUKAB_ALLOWED_ORIGINS", "").split(",") if value.strip()}
-            if not allowed:
-                allowed = {f"http://{self.headers.get('Host', '')}"}
-            if origin not in allowed:
+        hosts = self.headers.get_all("Host", [])
+        configured = self.server.external_origins
+        local_ip, port = self.connection.getsockname()[:2]
+        local_names = self.server.local_names | {local_ip}
+        # The stock panel sends a bare Host even on a non-default port.
+        allowed_hosts = local_names | {f"{name}:{port}" for name in local_names} | self.server.external_hosts
+        if hosts or self.request_version != "HTTP/1.0":
+            if len(hosts) != 1 or hosts[0].lower() not in allowed_hosts:
+                self.close_connection = True
+                self._send_json({"error": "Unrecognized request host."}, status=403)
+                return False
+        origins = self.headers.get_all("Origin", [])
+        if self.command == "POST" and origins:
+            allowed = configured or ({f"http://{hosts[0].lower()}"} if hosts else set())
+            if len(origins) != 1 or origins[0].lower() not in allowed:
                 self.close_connection = True
                 self._send_json({"error": "Origin is not allowed."}, status=403)
                 return False
@@ -1281,6 +1302,13 @@ class _Handler(BaseHTTPRequestHandler):
                 user, _, password = base64.b64decode(token, validate=True).partition(b":")
                 if any(hmac.compare_digest(password, secret)
                        for secret in credentials.get(user.decode("ascii"), ())):
+                    self.principal = user.decode("ascii")
+                    path = self.path.partition("?")[0]
+                    receipt_read = self.command == "GET" and path.startswith("/api/actions/")
+                    if self.principal == "panel" and not receipt_read and path not in _PANEL_ROUTES[self.command]:
+                        self.close_connection = True
+                        self._send_json({"error": "Browser credentials required."}, status=403)
+                        return False
                     return True
             except (ValueError, UnicodeError, binascii.Error):
                 pass
@@ -1382,7 +1410,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(_moments_summary())
             elif path.startswith("/api/actions/"):
                 job_id = path.removeprefix("/api/actions/")
-                state = self.server.receipts.state(job_id) or self._controller.job_state(job_id)
+                state = self.server.receipts.state(job_id, owner=self.principal)
+                if state is None and self.principal != "panel":
+                    state = self._controller.job_state(job_id)
                 if state is None:
                     raise _ApiError("No such action.", status=404)
                 self._send_json({"ok": True, "job": state})
@@ -1402,7 +1432,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _public_failure(self, message):
         error_id = uuid.uuid4().hex[:12]
-        logger.exception("%s %s failed [%s]", self.command, self.path.split("?")[0], error_id)
+        logger.error("%s %r failed [%s] (%s)", self.command, self.path.partition("?")[0],
+                     error_id, type(sys.exception()).__name__)
         return {"ok": False, "error": message, "error_id": error_id}
 
     def _send_api_error(self, exc):
@@ -1421,9 +1452,11 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             receipt = None
             key = self.headers.get("Idempotency-Key")
+            if self.principal == "panel" and not key:
+                key = uuid.uuid4().hex
             if key is not None and path in _RETRIABLE:
                 fingerprint = hashlib.sha256(json.dumps([path, body], sort_keys=True).encode()).digest()
-                receipt, previous = self.server.receipts.reserve(key, fingerprint)
+                receipt, previous = self.server.receipts.reserve(key, fingerprint, owner=self.principal)
                 if previous is not None:
                     status, payload = previous
                     self._send_json(payload, status=status)
@@ -1600,6 +1633,13 @@ _RETRIABLE = {"/api/lights/action", "/api/lights/control", "/api/purifier/action
               "/api/vacuum/action", "/api/camera/capture", "/api/camera/delete", "/api/routines/run",
               "/api/lights/library/recall", "/api/lights/library/save"}
 
+_PANEL_ROUTES = {
+    "GET": {"/api/health", "/api/events", "/api/status/cached", "/api/panel/status", "/api/panel/alert",
+            "/api/panel/alert.rgb565", "/api/panel/moment.rgb565"},
+    "POST": {"/api/lights/action", "/api/lights/control", "/api/vacuum/action",
+             "/api/purifier/action", "/api/camera/capture"},
+}
+
 
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Thread-per-request server with explicit admission control."""
@@ -1621,6 +1661,9 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
         self.camera_jobs = camera_features.CameraJobs(self.stopped, notify_status_changed, self.camera_presence)
         self.notifier = None
         self.credentials = _credentials()
+        local_name = os.getenv("COUKAB_LOCAL_NAME", "coukab").lower()
+        self.local_names = {"localhost", socket.gethostname().lower(), f"{local_name}.local"}
+        self.external_origins, self.external_hosts = _configured_origins()
         self._handler_slots = threading.BoundedSemaphore(_MAX_HANDLER_THREADS)
         super().__init__(*args, **kwargs)
         self.routine_worker = Worker("household-routines", 32)
@@ -1653,7 +1696,7 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
             if self.household:
                 self.household.record_safely("camera", action, outcome, time.monotonic() - start)
 
-    def run_routine(self, name, local_time=None):
+    def run_routine(self, name, local_time=None, *, expected_steps=None):
         def execute(step):
             if self.stopped.is_set():
                 raise RuntimeError("Controller stopping")
@@ -1682,7 +1725,7 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
             finally:
                 self.household.record_safely("schedule" if local_time else "routine",
                                              f"{device}/{body['action']}", outcome, time.monotonic() - started)
-        return self.household.run(name, execute, local_time=local_time)
+        return self.household.run(name, execute, local_time=local_time, expected_steps=expected_steps)
 
     def schedule_loop(self):
         previous = None

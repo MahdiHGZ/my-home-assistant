@@ -17,6 +17,7 @@ class ReceiptError(ValueError):
 class Receipt:
     id: str
     fingerprint: bytes
+    owner: str | None = None
     response: tuple | None = None
     completed_at: float | None = None
 
@@ -32,7 +33,7 @@ class Receipts:
         self.capacity = capacity
         self.lifetime = lifetime
 
-    def reserve(self, key, fingerprint):
+    def reserve(self, key, fingerprint, *, owner=None):
         if not re.fullmatch(r"[a-zA-Z0-9._-]{1,128}", key):
             raise ReceiptError("Invalid Idempotency-Key.", 400)
         with self.lock:
@@ -40,15 +41,16 @@ class Receipts:
             for old, receipt in list(self.entries.items()):
                 if receipt.completed_at is not None and receipt.completed_at < cutoff:
                     del self.entries[old]
-            existing = self.entries.get(key)
+            scoped_key = (owner, key)
+            existing = self.entries.get(scoped_key)
             if existing:
                 if existing.fingerprint != fingerprint:
                     raise ReceiptError("Idempotency key already used for another request.", 409)
                 return existing, existing.response or accepted(existing.id)
             if len(self.entries) >= self.capacity:
                 raise ReceiptError("Retry receipt capacity reached.", 429)
-            receipt = Receipt(uuid.uuid4().hex, fingerprint)
-            self.entries[key] = receipt
+            receipt = Receipt(uuid.uuid4().hex, fingerprint, owner)
+            self.entries[scoped_key] = receipt
             return receipt, None
 
     def finish(self, receipt, response):
@@ -66,10 +68,10 @@ class Receipts:
         controller.on_job_finished(job_id, complete)
         return accepted(receipt.id)
 
-    def state(self, job_id):
+    def state(self, job_id, *, owner=None):
         with self.lock:
             entry = next((r for r in self.entries.values() if r.id == job_id), None)
-            if entry is None:
+            if entry is None or (owner is not None and entry.owner != owner):
                 return None
             response = entry.response
         if response is None:

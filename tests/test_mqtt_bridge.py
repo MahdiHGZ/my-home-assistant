@@ -21,6 +21,7 @@ class MqttInboxTests(unittest.TestCase):
         self.addCleanup(self.worker.thread.join, 2)
         self.addCleanup(self.worker.stop)
         self.runs = []
+        self.actions = []
         self.runs_ready = threading.Event()
         self.server = SimpleNamespace(household=self.household, routine_worker=self.worker,
                                       run_routine=self.run_routine)
@@ -37,7 +38,11 @@ class MqttInboxTests(unittest.TestCase):
         self.bridge.command_worker = threading.Thread(target=self.bridge._dispatch_loop, daemon=True)
         self.bridge.command_worker.start()
 
-    def run_routine(self, name):
+    def run_routine(self, name, *, expected_steps):
+        result = self.household.run(name, lambda step: self.actions.append(step["action"]),
+                                    expected_steps=expected_steps)
+        if result is None:
+            return
         self.runs.append(name)
         if len(self.runs) == 2:
             self.runs_ready.set()
@@ -125,6 +130,37 @@ class MqttInboxTests(unittest.TestCase):
         self.send("new")
         self.assertEqual(self.bridge.settings()["routines"], [])
         self.assertEqual(self.pending_count(), 0)
+
+    def test_queued_press_is_discarded_when_routine_steps_change(self):
+        self.send("old-steps")
+        self.household.save({"name": "Evening", "steps": [{"device": "lights", "action": "full_bright"}]})
+        self.send("new-steps")
+        with self.household.connection() as db:
+            commands = db.execute("SELECT id, received FROM mqtt_inbox ORDER BY rowid").fetchall()
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.bridge._run_once(*command)
+
+        self.assertEqual(self.actions, ["full_bright"])
+        self.assertEqual(len(self.household.recent_runs()), 1)
+        self.send("old-steps")
+        self.assertEqual(self.pending_count(), 0)
+
+    def test_upgrade_discards_legacy_press_but_preserves_deduplication(self):
+        self.bridge.close()
+        with self.household.connection() as db:
+            db.execute("DROP TABLE mqtt_inbox")
+            db.execute("CREATE TABLE mqtt_inbox (id TEXT PRIMARY KEY, routine TEXT, received REAL)")
+            db.execute(
+                "INSERT INTO mqtt_inbox VALUES (?, ?, strftime('%s', 'now'))",
+                (routine_id("Evening") + "/legacy", "Evening"),
+            )
+        self.bridge = self.new_bridge()
+        self.assertEqual(self.pending_count(), 0)
+        self.send("legacy")
+        self.assertEqual(self.pending_count(), 0)
+        self.send("fresh")
+        self.assertEqual(self.pending_count(), 1)
 
     def test_retained_samples_and_discovery_removal_use_same_publisher(self):
         state_topic = self.bridge.base + "/state/temperature"

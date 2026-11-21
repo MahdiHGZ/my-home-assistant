@@ -109,6 +109,42 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/api/routines/delete", {"name": "a"}, Origin="https://other.invalid", **auth)[0], 403)
         self.assertEqual(self.request("/api/routines/delete", {"name": "a"}, Origin="http://%s:%d" % self.server.server_address, **auth)[0], 200)
 
+    def test_local_and_configured_dashboard_hosts(self):
+        for host in ("localhost", "coukab.local", "dashboard.example.test"):
+            with self.subTest(host=host):
+                status = self.request("/api/health", Host=host)[0]
+                self.assertEqual(status, 403 if host == "dashboard.example.test" else 200)
+        with patch.dict(os.environ, {"COUKAB_ALLOWED_ORIGINS": "https://dashboard.example.test"}):
+            self.server.external_origins, self.server.external_hosts = web._configured_origins()
+        headers = {"Host": "dashboard.example.test", "Origin": "https://dashboard.example.test"}
+        self.assertEqual(self.request("/api/health", Host=headers["Host"])[0], 200)
+        self.assertEqual(self.request("/api/routines/delete", {"name": "unused"}, **headers)[0], 200)
+
+    def test_panel_read_scope_and_receipt_isolation(self):
+        self.server.credentials = {"browser": (b"owner",), "panel": (b"panel-pass",)}
+        auth = {"Authorization": "Basic " + base64.b64encode(b"panel:panel-pass").decode()}
+        self.assertEqual(self.request("/api/health", **auth)[0], 200)
+        self.assertEqual(self.request("/api/setup", **auth)[0], 403)
+        self.assertEqual(self.request("/api/mqtt", {}, **auth)[0], 403)
+        self.assertEqual(self.request("/api/camera/settings", {}, **auth)[0], 403)
+        for owner, status in (("panel", 200), ("browser", 404)):
+            receipt, previous = self.server.receipts.reserve("same-key", b"action", owner=owner)
+            self.assertIsNone(previous)
+            self.assertEqual(self.request("/api/actions/" + receipt.id, **auth)[0], status)
+
+    def test_private_media_headers_and_query_logging(self):
+        with patch.object(web.tapo, "MOMENTS_DIR", Path(self.tmp.name)):
+            (Path(self.tmp.name) / "kitchen.jpg").write_bytes(b"image")
+            with self.assertLogs(web.logger, level="DEBUG") as logs:
+                status, headers, image = self.request("/moments/kitchen.jpg?download=1&label=family")
+            self.assertEqual((status, image), (200, b"image"))
+            self.assertEqual(headers["Cache-Control"], "private, no-store")
+            self.assertNotIn("label=family", "".join(logs.output))
+        with patch.object(web, "_panel_alert_rgb565", return_value=b"pixels"):
+            self.assertEqual(self.request("/api/panel/alert.rgb565")[1]["Cache-Control"], "private, no-store")
+        self.assertEqual(self.request("/setup")[1]["Content-Security-Policy"], "frame-ancestors 'self'")
+        self.assertEqual((Path(self.tmp.name) / "state.db").stat().st_mode & 0o077, 0)
+
     def test_negotiation_revalidation_and_local_edit(self):
         root = Path(self.tmp.name)
         asset = root / "app.js"

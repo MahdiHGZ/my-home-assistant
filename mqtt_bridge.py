@@ -55,12 +55,17 @@ class Bridge:
                 CREATE TABLE IF NOT EXISTS mqtt_discovery (topic TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS mqtt_commands (id TEXT PRIMARY KEY, issued REAL);
                 CREATE TABLE IF NOT EXISTS mqtt_inbox (
-                    id TEXT PRIMARY KEY, routine TEXT NOT NULL, received REAL NOT NULL
+                    id TEXT PRIMARY KEY, routine TEXT NOT NULL, received REAL NOT NULL, steps TEXT NOT NULL
                 );
             """)
+            db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT OR IGNORE INTO mqtt_settings VALUES(1,?,?)",
                        ("coukab_" + uuid.uuid4().hex[:16], '{"enabled":false,"sensors":[],"routines":[]}'))
             db.execute("INSERT OR IGNORE INTO mqtt_commands SELECT id, received FROM mqtt_inbox")
+            if not any(column["name"] == "steps" for column in db.execute("PRAGMA table_info(mqtt_inbox)")):
+                db.execute("ALTER TABLE mqtt_inbox ADD COLUMN steps TEXT")
+                # Legacy commands have no saved definition, but their IDs still deduplicate.
+                db.execute("DELETE FROM mqtt_inbox")
             self.node = db.execute("SELECT node FROM mqtt_settings").fetchone()[0]
         self.base = f"coukab/{self.node}"
 
@@ -192,7 +197,11 @@ class Bridge:
             ).fetchone()[0] >= _REPLAY_LIMIT:
                 log.warning("MQTT routine command declined because the command inbox is full")
                 return
-            db.execute("INSERT INTO mqtt_inbox VALUES(?,?,?)", (command_id, name, now))
+            routine = db.execute("SELECT steps FROM routines WHERE name=?", (name,)).fetchone()
+            if routine is None:
+                return
+            db.execute("INSERT INTO mqtt_inbox (id, routine, received, steps) VALUES(?,?,?,?)",
+                       (command_id, name, now, routine["steps"]))
             db.execute("INSERT INTO mqtt_commands VALUES(?,?)", (command_id, now))
         self.commands_ready.set()
 
@@ -229,16 +238,17 @@ class Bridge:
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             command = db.execute(
-                "SELECT routine FROM mqtt_inbox WHERE id=? AND received=?", (command_id, received)
+                "SELECT routine, steps FROM mqtt_inbox WHERE id=? AND received=?", (command_id, received)
             ).fetchone()
             if not command:
                 return
-            name = command[0]
+            name, steps = command
             db.execute("DELETE FROM mqtt_inbox WHERE id=?", (command_id,))
             selection = json.loads(db.execute("SELECT selection FROM mqtt_settings").fetchone()[0])
-            if received < now - _COMMAND_TTL or not selection["enabled"] or name not in selection["routines"]:
+            if (steps is None or received < now - _COMMAND_TTL
+                    or not selection["enabled"] or name not in selection["routines"]):
                 return
-        self.server.run_routine(name)
+        self.server.run_routine(name, expected_steps=steps)
 
     def discovery(self, selection):
         configs = {}

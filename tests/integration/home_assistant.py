@@ -68,8 +68,8 @@ def main():
         household.save({"name": "Evening", "steps": [{"device": "lights", "action": "all_off"}]})
         worker = Worker("mqtt-test", 4)
 
-        def run(name):
-            return household.run(name, lambda step: pressed.append(step["action"]))
+        def run(name, *, expected_steps):
+            return household.run(name, lambda step: pressed.append(step["action"]), expected_steps=expected_steps)
 
         bridge = Bridge(SimpleNamespace(household=household, routine_worker=worker, run_routine=run))
         bridge.configure({"enabled": True, "sensors": ["temperature"], "routines": ["Evening"]})

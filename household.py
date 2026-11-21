@@ -16,6 +16,10 @@ from device_actions import describe
 class Household:
     def __init__(self, path):
         self.path = Path(path)
+        try:
+            self.path.touch(mode=0o600, exist_ok=False)
+        except FileExistsError:
+            pass
         with self.connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS actions (
@@ -120,18 +124,23 @@ class Household:
         with self.connection() as db:
             db.execute("DELETE FROM routines WHERE name=?", (name,))
 
-    def run(self, name, execute, *, local_time: datetime | None = None):
+    def run(self, name, execute, *, local_time: datetime | None = None, expected_steps: str | None = None):
         # Claim a scheduled local date before device I/O. An interrupted run
         # keeps its claim, including during a repeated DST hour or restart.
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM routines WHERE name=?", (name,)).fetchone()
             if row is None:
+                if expected_steps is not None:
+                    return None
                 raise ValueError("No such routine.")
             if local_time and row["schedule"] != local_time.strftime("%H:%M"):
                 return None
             day = local_time.date().isoformat() if local_time else None
             steps = json.loads(row["steps"])
+            # Claim the same steps that were authorized when the press was queued.
+            if expected_steps is not None and steps != json.loads(expected_steps):
+                return None
             initial = [{"device": s["device"], "action": s["action"], "status": "pending"} for s in steps]
             db.execute("DELETE FROM runs WHERE local_date IS NOT NULL AND ts < ?", (time.time() - 7*86400,))
             cursor = db.execute("INSERT OR IGNORE INTO runs VALUES(NULL,?,?,?,?)",

@@ -12,3 +12,7 @@ Limit changes in these areas to fixes for existing bugs, their regression tests,
 When proposing GitHub issues, design for one household overview with the most important states, quick controls, and anything that needs attention. Give each device a dedicated view for everyday controls and advanced settings. Keep the overview usable on a phone and support English and Farsi.
 
 Look for capabilities of the installed models that the dashboard has yet to expose. Check device adapters, manufacturer documentation, and local firmware support. Describe the user task, priority, acceptance criteria, and verification for each proposal. Prefer cross-device workflows with a clear household benefit. Research complementary integrations, explain their setup and behavior when a dependency is offline, and link related issues before opening a new one. The subsystem freezes above also apply to these proposals' implementation.
+
+# Security review
+
+Include a security reviewer when reviewing changes to network access, device commands or household data. Check which identity can initiate a command, how queued work handles edits or revoked consent, and where credentials, camera images and household activity can be stored or logged. Record the affected issue, the impact, and which protections were verified in CI or still require deployment checks.

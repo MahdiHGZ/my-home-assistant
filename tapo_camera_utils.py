@@ -85,7 +85,7 @@ def validate_config() -> None:
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise TapoError(f"Missing environment variables: {', '.join(missing)}")
-    logger.info("Tapo config OK — IP: %s, User: %s", host, user)
+    logger.info("Tapo config OK — IP: %s", host)
 
 
 def get_client(config=None) -> Tapo:
@@ -115,8 +115,8 @@ def get_client(config=None) -> Tapo:
         )
         logger.info("Connected to Tapo API at %s (cloud fallback).", host)
         return client
-    except Exception as e:
-        raise TapoError(f"All authentication methods failed: {e}") from e
+    except Exception:
+        raise TapoError("Camera authentication failed.") from None
 
 
 class CameraPrivateError(TapoError):
@@ -216,6 +216,7 @@ def _connect(config, substream: bool, client=None) -> cv2.VideoCapture | None:
 def _atomic_imwrite(path: Path, frame, *, capture: bool = False) -> None:
     """Encode beside the destination and publish only a complete image."""
     temp_path = path.parent / f".{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}"
+    temp_path.touch(mode=0o600, exist_ok=False)
     try:
         if not cv2.imwrite(str(temp_path), frame):
             raise TapoError(f"Failed to encode image: {path}")
@@ -286,7 +287,7 @@ def _write_thumbnail(path: Path, frame) -> None:
     h, w = frame.shape[:2]
     size = (256, max(1, round(256 * h / w)))
     thumbnail = cv2.resize(frame, size, interpolation=cv2.INTER_AREA) if w > 256 else frame
-    path.parent.mkdir(exist_ok=True)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
     _atomic_imwrite(path, thumbnail)
 
 
@@ -312,8 +313,8 @@ def thumbnail_for(original: Path) -> Path:
 def save_moment(frame) -> Path:
     with camera_policy.lock, moments_lock:
         require_capture_allowed()
-        MOMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        (MOMENTS_DIR / ".thumbs").mkdir(exist_ok=True)
+        MOMENTS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (MOMENTS_DIR / ".thumbs").mkdir(mode=0o700, exist_ok=True)
         filename = (
             datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
             + f"-{uuid.uuid4().hex[:8]}.jpg"

@@ -23,6 +23,7 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+UMask=0077
 WatchdogSec=60
 TimeoutStopSec=20
 WorkingDirectory=%h/coukab_lan
