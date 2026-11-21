@@ -9,6 +9,7 @@ import socket
 import threading
 
 from dotenv.parser import parse_stream
+from dotenv.main import resolve_variables
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
 import tapo_camera_utils as camera
@@ -43,7 +44,10 @@ def reload_devices(path=Path(".env")):
         raise ValueError("Cannot read the local .env file.") from exc
     if any(entry.error for entry in parsed):
         raise ValueError("Invalid .env syntax.")
-    values = {entry.key: entry.value or "" for entry in parsed if entry.key}
+    # Resolve file-local references against the replacement first, so a reload
+    # also picks up edits to variables used by the device credentials.
+    resolved = resolve_variables(((entry.key, entry.value) for entry in parsed if entry.key), override=True)
+    values = {key: value or "" for key, value in resolved.items()}
     updates = {}
     for name, keys in GROUPS.items():
         optional = {"TAPO_CLOUD_PASSWORD"} if name == "camera" else set()

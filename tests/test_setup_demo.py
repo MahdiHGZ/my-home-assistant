@@ -17,6 +17,14 @@ import server_setup as setup
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_reload_expands_file_and_environment_references(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CAM_HOST": "192.0.2.9", "CAM_USER": "old"}):
+            file = Path(tmp) / ".env"
+            file.write_text("CAM_USER=new\nTAPO_IP=${CAM_HOST}\nTAPO_USERNAME=${CAM_USER}\nTAPO_PASSWORD=demo\n")
+            with patch.object(setup.camera, "set_credentials") as install:
+                self.assertEqual(setup.reload_devices(file), ["camera"])
+            install.assert_called_once_with(("192.0.2.9", "new", "demo", ""))
+
     def test_invalid_replacement_preserves_active_handles_and_hides_secrets(self):
         original = setup.camera.credentials()
         helper = setup.vacuum._HELPER
