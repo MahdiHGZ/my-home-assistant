@@ -155,6 +155,7 @@ def install():
     def stream(*args, **kwargs):
         tapo.require_capture_allowed()
         return DemoStream()
+    tapo.availability = lambda: {"available": True}
     tapo.connect = stream
     tapo.get_client = lambda *args: SimpleNamespace(getPrivacyMode=lambda: {"enabled": "off"})
     tapo.capture_moment(stream())

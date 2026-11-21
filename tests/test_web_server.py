@@ -211,6 +211,14 @@ class LightsActionTests(unittest.TestCase):
         with self.assertRaises(web_server._ApiError):
             web_server._lights_action(self.c, {"action": "frobnicate"})
 
+    def test_relative_brightness_preserves_explicit_targets(self):
+        web_server._lights_action(self.c, {"action": "brightness_up", "targets": ["I1"]})
+        self.assertEqual(self.c.calls, [("_do_brightness", (20,), {"retry": False, "targets": ["I1"]})])
+        for targets in ([], "all", [" "]):
+            with self.assertRaises(web_server._ApiError):
+                web_server._lights_action(self.c, {"action": "brightness_up", "targets": targets})
+        self.assertEqual(len(self.c.calls), 1)
+
     def test_missing_action_raises(self):
         with self.assertRaises(web_server._ApiError):
             web_server._lights_action(self.c, {})

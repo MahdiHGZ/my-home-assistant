@@ -1,9 +1,12 @@
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from cleaning_air import CleaningAir
 from household import Household
+from xiaomi_airpurifier_utils import PURIFIER_MODEL
 from xiaomi_vacuum_utils import Status
 
 
@@ -15,15 +18,23 @@ class CleaningAirTests(unittest.TestCase):
         self.purifier = {"power": False, "mode": 1}
         self.online = True
         self.writes = []
+        self.device = self._device("02:00:00:00:00:01")
+        self.enterContext(patch("cleaning_air.purifier.get_device", side_effect=lambda: self.device))
         self.routine = self._load()
+
+    @staticmethod
+    def _device(address):
+        return SimpleNamespace(info=lambda **kwargs: SimpleNamespace(
+            model=PURIFIER_MODEL, firmware_version="1.0", mac_address=address
+        ))
 
     def _load(self):
         routine = CleaningAir(self.household)
-        routine.purifier_state = lambda: self.purifier.copy() if self.online else None
+        routine.purifier_state = lambda device: self.purifier.copy() if self.online else None
         routine.write = self._write
         return routine
 
-    def _write(self, name, value):
+    def _write(self, device, name, value):
         self.writes.append((name, value))
         self.purifier[name] = value
         return True
@@ -92,7 +103,7 @@ class CleaningAirTests(unittest.TestCase):
 
     def test_restart_does_not_replay_an_ambiguous_command(self):
         self.arm()
-        def uncertain(name, value):
+        def uncertain(device, name, value):
             self.writes.append((name, value))
             raise TimeoutError
         self.routine.write = uncertain
@@ -109,3 +120,79 @@ class CleaningAirTests(unittest.TestCase):
         self.routine.observe(Status.CHARGING, 20)
         self.routine.observe(Status.SWEEPING, 25)
         self.assertEqual(self.writes, [("power", True)])
+
+    def test_disabling_restores_both_settings_even_while_cleaning(self):
+        self.arm()
+        self.begin()
+        self.routine.configure({"enabled": False, "mode": "auto", "seconds": 15})
+        for now in (20, 25, 30):
+            self.routine.observe(Status.SWEEPING, now)
+        self.assertEqual(self.writes, [("power", True), ("mode", 0), ("mode", 1), ("power", False)])
+        self.assertEqual(self.routine.status()["phase"], "disabled")
+
+    def test_purifier_replacement_does_not_receive_old_restore_after_restart(self):
+        self.arm(seconds=0)
+        self.begin()
+        self.routine = self._load()
+        self.device = self._device("02:00:00:00:00:02")
+        self.routine.observe(Status.CHARGING, 20)
+        self.assertEqual(self.writes, [("power", True), ("mode", 0)])
+        self.assertIsNone(self.routine.state["run"])
+
+    def test_write_uses_the_transport_from_the_same_observation(self):
+        self.arm()
+        original = self.device
+
+        def read(device):
+            self.assertIs(device, original)
+            self.device = self._device("02:00:00:00:00:02")
+            return self.purifier.copy()
+
+        def write(device, name, value):
+            self.assertIs(device, original)
+            return self._write(device, name, value)
+
+        self.routine.purifier_state = read
+        self.routine.write = write
+        self.routine.observe(Status.SWEEPING, 5)
+        self.assertEqual(self.writes, [("power", True)])
+
+    def test_rejected_then_ambiguous_restore_recovers_after_offline(self):
+        self.arm(seconds=0)
+        self.begin()
+        attempts = []
+
+        def restore(device, name, value):
+            if name == "mode" and len(attempts) < 2:
+                attempts.append((name, value))
+                if len(attempts) == 2:
+                    raise TimeoutError
+                return False
+            return self._write(device, name, value)
+
+        self.routine.write = restore
+        self.routine.observe(Status.CHARGING, 20)
+        self.routine.observe(Status.CHARGING, 21)
+        self.routine.observe(Status.CHARGING, 25)
+        self.online = False
+        self.routine = self._load()
+        self.routine.observe(Status.CHARGING, 30)
+        self.online = True
+        for now in (35, 40, 45, 50, 55):
+            self.routine.observe(Status.CHARGING, now)
+        self.assertEqual(attempts, [("mode", 1), ("mode", 1)])
+        self.assertEqual(self.writes, [("power", True), ("mode", 0), ("mode", 1), ("power", False)])
+        self.assertEqual(self.routine.status()["phase"], "armed")
+
+    def test_manual_change_during_restore_backoff_stays_in_place(self):
+        self.arm(seconds=0)
+        self.begin()
+        self.routine.write = lambda device, name, value: False
+        self.routine.observe(Status.CHARGING, 20)
+        self.purifier["mode"] = 2
+        self.routine.write = self._write
+        self.routine.observe(Status.CHARGING, 25)
+        self.routine.observe(Status.CHARGING, 30)
+        self.assertEqual(self.writes, [("power", True), ("mode", 0), ("power", False)])
+        self.assertEqual(self.purifier, {"power": False, "mode": 2})
+        self.assertEqual(self.routine.status()["phase"], "armed")

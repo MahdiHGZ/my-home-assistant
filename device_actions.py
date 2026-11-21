@@ -90,10 +90,10 @@ def describe(device, body):
 
 
 class LightActions:
-    def apply_light(self, action, body):
+    def apply_light(self, action, body, **properties):
         replay_safe = action.name in {"mode", "full_bright", "all_off", "party_pattern"}
         return self.run_action(getattr(self, action.handler), *action.parameters(body),
-                               retry=replay_safe, **action.kwargs)
+                               retry=replay_safe, **action.kwargs, **properties)
 
     def control_lights(self, targets, **properties):
         return self.run_action(self._do_control, targets, **properties)

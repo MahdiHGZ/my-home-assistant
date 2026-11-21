@@ -31,6 +31,8 @@ jobs:
       - run: node --check web/app.js
       - run: npm ci --prefix tests/browser
       - run: node --test tests/browser/*.test.cjs
+      - if: matrix.python == '3.12'
+        run: node tests/browser/mobile.cjs
 
   firmware-host:
     runs-on: ubuntu-latest

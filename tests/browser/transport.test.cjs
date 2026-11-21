@@ -37,7 +37,7 @@ test("polling recovers SSE loss, referenced icons exist and keyboard release sto
   t.after(()=>dom.window.close());
   const w = dom.window, calls = [];
   w.EventSource = class {constructor(){w.stream=this;} addEventListener(){} close(){}};
-  w.request = async (method,path,body) => {calls.push([method,path,body]); return {epoch:"epoch"};};
+  w.request = async (method,path,body) => {calls.push([method,path,body]); return {epoch:"epoch",drive_epoch:"epoch"};};
   w.setTimeout=()=>1;
   w.eval(file("dashboard.js")+"\n"+file("app.js").replace(/\binit\(\);\s*$/,"")+ `
     api=window.request; renderAll=()=>{}; connectEvents(); eventSource.onopen(); eventSource.onerror();

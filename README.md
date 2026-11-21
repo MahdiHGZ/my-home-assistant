@@ -37,7 +37,7 @@ python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 ```
 
-The deployment lock supports CPython 3.11 and 3.12 on Linux. Install a C compiler, Python development headers and Linux input headers for packages that build native extensions. The exported `requirements.txt` installs the locked runtime. With `uv`, use `uv sync --locked --no-dev` for deployment or `uv sync --locked --group llm` for the existing optional model runtime.
+The deployment lock supports CPython 3.11 and 3.12 on Linux. Install a C compiler, Python development headers and Linux input headers for packages that build native extensions. The exported `requirements.txt` installs the locked runtime. For a `uv` deployment, run `UV_PROJECT_ENVIRONMENT=venv uv sync --locked --no-dev` to match the systemd unit's Python path. Add `--group llm` to install the optional model runtime.
 
 Update dependencies by editing `pyproject.toml`, running `uv lock --upgrade`, and regenerating the pip file with `uv export --locked --no-dev --no-emit-project --no-hashes --no-annotate --no-header -o requirements.txt`. Commit both files after the clean-install CI passes.
 
@@ -184,7 +184,8 @@ A live, high-performance dashboard featuring a modern minimal glassmorphic desig
 *   **Air purifier** — power, modes, fan level, favorite speed, ionizer / child-lock
     / buzzer toggles, screen brightness, and live PM2.5 / temperature / humidity.
 *   **Camera** — capture a moment (with or without a flash blink) and browse recent
-    shots. Features instant downloading and hold-to-delete (safely confined to the `moments/` directory and optionally password-protected).
+    shots. Add captions to find a retained photo by name or text. Use **Preview** for a fresh frame without adding it to the gallery. Camera settings include local-time privacy intervals, an opt-in motion watcher and an interval recorder. The recorder exports up to 60 ordered JPEG frames in a ZIP. A camera reporting physical privacy mode stays private. A failed privacy check blocks capture. Motor controls appear only when the camera reports support.
+*   **Household overview and rooms** — check active cleaning and faults, run a favorite scene, or open a device’s advanced controls. Group bulbs and save their current settings as a scene. Assign devices to rooms and optionally place them on a locally stored floor plan. The dashboard includes English and Farsi labels, keyboard shortcuts, and a printable keypad reference.
 *   **Assistant** — a chat box for the local LLM ("Khatoon"); appears only when the
     model is installed (see below).
 
@@ -315,3 +316,5 @@ For a hardware-free household run `uv run --locked main.py --demo --watch-assets
 To share devices with Home Assistant, configure the same MQTT 5 broker on both systems, restart Coukab, then open **Setup → Home Assistant · MQTT**. Enable sharing and select individual readings and named routines. The dashboard and keypad work independently of the broker. Clearing a selection removes its discovery entry. Disable sharing and let the connected broker acknowledge the removals before removing the broker configuration. Restrict the command topics to trusted publishers using your broker's ACLs and enable TLS for remote connections.
 
 An external door contact can trigger an existing evening routine. Share the routine in Setup, then create a Home Assistant automation with the contact changing to open as its trigger and **Button: Press** on the discovered Coukab routine as its action. Its device steps appear under **Recent runs**. The bridge ignores retained commands and stores command IDs for 24 hours to deduplicate redeliveries. [Home Assistant MQTT discovery](https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery)
+
+When the routine worker is busy, Coukab stores up to 128 distinct MQTT presses in the household database. A press expires after one minute if it has not started. When the inbox is full, Coukab logs rejected presses. Disabling sharing or removing a routine from sharing discards its queued presses.

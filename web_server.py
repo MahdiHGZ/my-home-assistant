@@ -594,6 +594,7 @@ def _build_status(controller) -> dict:
                 result[key] = {"available": False, "error": str(e)}
         result["lights"]["state"] = controller.state()
         result["moments"] = _moments_summary()
+        result["camera"] = tapo.availability()
         generated_at = time.monotonic()
         with _last_status_lock:
             for key in futures:
@@ -862,8 +863,17 @@ def _lighting_library_mutation(store, controller, path, body):
 
 
 def _lights_action(controller, body: dict) -> dict:
+    options = {}
+    if body.get("action") in ("brightness_up", "brightness_down") and "targets" in body:
+        body = dict(body)
+        targets = body.pop("targets")
+        if not isinstance(targets, list) or not targets or not all(
+            isinstance(name, str) and name.strip() for name in targets
+        ):
+            raise _ApiError("Select at least one target light.")
+        options["targets"] = targets
     descriptor = _describe("lights", body)
-    controller.apply_light(descriptor, body)
+    controller.apply_light(descriptor, body, **options)
     return {"ok": True, "state": controller.state()}
 
 
@@ -874,7 +884,7 @@ def _describe(device, body):
         raise _ApiError(str(exc)) from exc
 
 
-def _lights_control(controller, body: dict) -> dict:
+def _lights_control(controller, body: dict, *, before_control=None) -> dict:
     _reject_unknown(body, {"targets", "power", "brightness", "color"})
     targets = body.get("targets", "all")
     if not isinstance(targets, str) and not (
@@ -894,11 +904,12 @@ def _lights_control(controller, body: dict) -> dict:
         power=power,
         brightness=brightness,
         color=color,
+        **({"before_control": before_control} if before_control is not None else {}),
     )
     return {"ok": bool(result.get("ok")), "result": result, "state": controller.state()}
 
 
-def _vacuum_action(body: dict) -> dict:
+def _vacuum_action(body: dict, *, before_control=None) -> dict:
     action = _string_field(body, "action")
     if action == "remote":
         _reject_unknown(body, {"action", "value", "session", "seq", "epoch"})
@@ -907,12 +918,14 @@ def _vacuum_action(body: dict) -> dict:
         descriptor = _describe("vacuum", body)
     try:
         with _vacuum_action_lock:
+            if before_control is not None:
+                before_control()
             if descriptor is None:
                 return _drive.command(body)
             if action in {"sweep", "mop", "sweep_mop", "stop", "pause", "dock", "room_sweep"}:
                 _drive.revoke()
             getattr(vacuum, descriptor.handler)(*descriptor.parameters(body))
-    except _ApiError:
+    except (_ApiError, tapo.CameraPrivateError):
         raise
     except Exception as e:
         vacuum.reset_device()
@@ -1476,14 +1489,15 @@ class _Handler(BaseHTTPRequestHandler):
                         _reject_unknown(body, {"name", "steps", "schedule"})
                         self.server.household.save(body)
                         if self.server.mqtt:
-                            self.server.mqtt.changed.set()
+                            self.server.mqtt.request_reconcile()
                         return 200, {"ok": True}
                     _reject_unknown(body, {"name"})
                     name = _string_field(body, "name")
                     if path.endswith("/delete"):
-                        self.server.household.delete(name)
                         if self.server.mqtt:
-                            self.server.mqtt.forget_routine(name)
+                            self.server.mqtt.delete_routine(name)
+                        else:
+                            self.server.household.delete(name)
                         return 200, {"ok": True}
                     result = self._controller.run_action(self.server.run_routine, name, lane=self.server.routine_worker,
                                                          retry=False, publish_result=True, timeout=2)
@@ -1611,18 +1625,29 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
         super().__init__(*args, **kwargs)
         self.routine_worker = Worker("household-routines", 32)
 
-    def camera_presence(self, rule):
-        if self.stopped.is_set():
-            return
+    def camera_presence(self, rule, settings):
+        def before_control():
+            tapo.require_capture_allowed()
+            if self.stopped.is_set():
+                raise tapo.CameraPrivateError("Camera presence action is no longer enabled.")
+            tapo.ensure_camera_on(tapo.get_client())
+            try:
+                current = camera_policy.read(tapo.MOMENTS_DIR)
+            except (OSError, ValueError) as exc:
+                raise tapo.CameraPrivateError("Camera privacy settings are unreadable.") from exc
+            if self.stopped.is_set() or current != settings:
+                raise tapo.CameraPrivateError("Camera presence action is no longer enabled.")
+            tapo.require_capture_allowed()
+
         start = time.monotonic()
         action = "lights/power" if rule == "lights_on" else "vacuum/pause"
         outcome = "failed"
         try:
             if rule == "lights_on":
-                if not _lights_control(self.controller, {"power": True})["ok"]:
+                if not _lights_control(self.controller, {"power": True}, before_control=before_control)["ok"]:
                     raise RuntimeError("Camera presence lighting action failed.")
             elif rule == "vacuum_pause":
-                _vacuum_action({"action": "pause"})
+                _vacuum_action({"action": "pause"}, before_control=before_control)
             outcome = "done"
         finally:
             if self.household:

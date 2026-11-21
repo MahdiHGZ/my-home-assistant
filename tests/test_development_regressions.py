@@ -16,6 +16,22 @@ import yeelight_bulb_utils as bulbs
 
 
 class BulbActionTests(unittest.TestCase):
+    def test_targeted_relative_brightness_changes_only_selected_bulbs(self):
+        controller = main.Controller()
+        registry = {"A": "first", "B": "second"}
+        with (
+            mock.patch.object(bulbs, "load_registered_bulbs", return_value=registry),
+            mock.patch.object(bulbs, "is_party_running", return_value=False),
+            mock.patch.object(bulbs, "save_state") as save,
+            mock.patch.object(bulbs, "adjust_brightness") as adjust,
+        ):
+            web._lights_action(controller, {"action": "brightness_up", "targets": ["B"]})
+            save.assert_called_once_with({"B": "second"})
+            adjust.assert_called_once_with({"B": "second"}, 20, snapshot=save.return_value)
+            with self.assertRaises(ValueError):
+                web._lights_action(controller, {"action": "brightness_up", "targets": ["A", "removed"]})
+            self.assertEqual(adjust.call_count, 1)
+
     def test_partial_brightness_retries_only_failed_bulb_at_absolute_target(self):
         for source in ("web", "keypad"):
             with self.subTest(source=source):

@@ -19,17 +19,35 @@ homeassistant:
   name: Coukab CI
   time_zone: UTC
 automation:
-  - alias: Acknowledge discovered temperature
+  - alias: Report discovered Coukab entities
     triggers:
-      - trigger: event
-        event_type: state_changed
-    conditions:
-      - condition: template
-        value_template: "{{ trigger.event.data.entity_id.startswith('sensor.') and trigger.event.data.new_state is not none and trigger.event.data.new_state.state == '23.5' }}"
+      - trigger: mqtt
+        topic: coukab-test/query
     actions:
       - action: mqtt.publish
         data:
           topic: coukab-test/observed
-          payload: "{{ trigger.event.data.new_state.state }}"
-          retain: true
+          payload: >-
+            {% set result = namespace(sensors=[], buttons=[]) %}
+            {% for entity in states.sensor if entity.name in ['Temperature', 'Coukab Temperature'] %}
+              {% set result.sensors = result.sensors + [{
+                'id': entity.entity_id, 'state': entity.state,
+                'unit': entity.attributes.get('unit_of_measurement')
+              }] %}
+            {% endfor %}
+            {% for entity in states.button if entity.name in ['Evening', 'Coukab Evening'] %}
+              {% set result.buttons = result.buttons + [{'id': entity.entity_id, 'state': entity.state}] %}
+            {% endfor %}
+            {{ {'request': trigger.payload, 'sensors': result.sensors, 'buttons': result.buttons} | to_json }}
+  - alias: Press the discovered Coukab routine button
+    triggers:
+      - trigger: mqtt
+        topic: coukab-test/press
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.payload.startswith('button.') }}"
+    actions:
+      - action: button.press
+        target:
+          entity_id: "{{ trigger.payload }}"
 """)

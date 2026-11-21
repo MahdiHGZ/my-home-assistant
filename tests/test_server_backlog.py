@@ -171,14 +171,17 @@ class LifecycleTests(unittest.TestCase):
         self.addCleanup(controller.shutdown)
         entered, ready = threading.Event(), threading.Event()
         cap = Mock()
-        def connect():
+        def connect(**settings):
             entered.set()
             ready.wait(3)
             return cap
         light = ["before"]
         def change(value):
             light[0] = value
-        with (patch.object(main.tapo_camera_utils, "connect", side_effect=connect),
+        client = Mock()
+        client.getPrivacyMode.return_value = {"enabled": "off"}
+        with (patch.object(main.tapo_camera_utils, "get_client", return_value=client),
+              patch.object(main.tapo_camera_utils, "connect", side_effect=connect),
               patch.object(main.tapo_camera_utils, "capture_moment", return_value=Path("shot.jpg")),
               patch.object(main.yeelight_bulb_utils, "load_registered_bulbs", return_value={}),
               patch.object(main.yeelight_bulb_utils, "read_state", side_effect=lambda _: light[0]),

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen, Request
 
@@ -49,6 +49,26 @@ class ConfigurationTests(unittest.TestCase):
             registered = zc.return_value.register_service.call_args_list
             self.assertEqual([c.args[0].parsed_addresses()[0] for c in registered],["192.0.2.7","192.0.2.8"])
             self.assertEqual(agent.local_url, "http://coukab.local:8080/")
+
+    def test_failed_advertisement_closes_transport_before_retrying(self):
+        import threading
+        from types import SimpleNamespace
+        server = SimpleNamespace(server_address=("0.0.0.0", 8080), stopped=threading.Event())
+        agent = setup.Advertisement(server, lambda: "192.0.2.7")
+        failed, recovered = Mock(), Mock()
+        failed.register_service.side_effect = RuntimeError("Name already in use")
+
+        with patch.object(setup, "Zeroconf", side_effect=[failed, recovered]) as zeroconf:
+            def tick(_):
+                failed.close.assert_called_once()
+                if zeroconf.call_count == 2:
+                    server.stopped.set()
+
+            with patch.object(server.stopped, "wait", side_effect=tick):
+                agent._loop()
+        self.assertEqual(zeroconf.call_count, 2)
+        recovered.register_service.assert_called_once()
+        recovered.close.assert_called_once()
 
 
 class DemoTests(unittest.TestCase):

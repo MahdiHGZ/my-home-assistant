@@ -97,17 +97,24 @@ class Advertisement:
             while not self.server.stopped.is_set():
                 try:
                     ip = self.current_address()
-                    if ip != address and not ipaddress.ip_address(ip).is_loopback:
+                    if ip != address:
                         if zc:
                             zc.close()
                             zc = None
-                        self.local_url = None
-                        zc = Zeroconf(interfaces=[ip], ip_version=IPVersion.V4Only)
+                        self.local_url = self.address = None
+                        address = None
+                    if ip != address and not ipaddress.ip_address(ip).is_loopback:
                         name = self.hostname
                         info = ServiceInfo("_http._tcp.local.", f"{name}._http._tcp.local.",
                                            addresses=[socket.inet_aton(ip)], port=port,
                                            server=f"{name}.local.", properties={"path": "/"})
-                        zc.register_service(info)
+                        candidate = Zeroconf(interfaces=[ip], ip_version=IPVersion.V4Only)
+                        try:
+                            candidate.register_service(info)
+                        except Exception:
+                            candidate.close()
+                            raise
+                        zc = candidate
                         address = self.address = ip
                         self.local_url = f"http://{name}.local:{port}/"
                 except Exception:

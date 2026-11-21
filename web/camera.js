@@ -18,6 +18,8 @@
       running: "Multi-angle capture running", done: "Multi-angle capture complete",
       cancelled: "Multi-angle capture cancelled", failedSweep: "Multi-angle capture failed",
       person: "Person detected", unknown: "Unclassified motion", applied: "Action applied",
+      presence: "Presence observations", lastSeen: "Last seen", notDetected: "No person detected", presenceUnknown: "Unknown",
+
       actionFailed: "Device action failed", digestActions: "Device actions", digestMoments: "Retained moments",
       failed: "Camera request failed", previewAlt: "Fresh camera preview", clear: "Close preview",
     },
@@ -37,6 +39,8 @@
       running: "در حال ثبت چندزاویه‌ای", done: "ثبت چندزاویه‌ای کامل شد",
       cancelled: "ثبت چندزاویه‌ای لغو شد", failedSweep: "ثبت چندزاویه‌ای ناموفق بود",
       person: "فرد شناسایی شد", unknown: "حرکت نامشخص", applied: "فرمان اجرا شد",
+      presence: "مشاهدات حضور", lastSeen: "آخرین مشاهده", notDetected: "فردی شناسایی نشد", presenceUnknown: "نامشخص",
+
       actionFailed: "فرمان دستگاه ناموفق بود", digestActions: "فرمان‌های دستگاه‌ها", digestMoments: "عکس‌های ذخیره‌شده",
       failed: "درخواست دوربین ناموفق بود", previewAlt: "پیش‌نمایش تازه دوربین", clear: "بستن پیش‌نمایش",
     },
@@ -182,6 +186,11 @@
       });
     }
   });
+  const presence = element("details", form);
+  presence.hidden = true;
+  element("summary", presence, "presence");
+  const lastSeen = element("p", presence);
+  const intervals = element("ul", presence);
   const events = element("ul", form);
   const search = element("details", root);
   element("summary", search, "search");
@@ -241,6 +250,16 @@
     cancelSweep.hidden = data.sweep.state !== "running";
     sweepState.textContent = data.sweep.state === "idle" ? ""
       : translate(data.sweep.state === "failed" ? "failedSweep" : data.sweep.state);
+    presence.hidden = !data.presence.intervals.length;
+    lastSeen.textContent = data.presence.last_seen
+      ? `${translate("lastSeen")} · ${data.presence.last_seen.replace("T", " ")}` : "";
+    intervals.replaceChildren();
+    for (const interval of data.presence.intervals.slice(0, 10)) {
+      const key = {person: "person", not_detected: "notDetected", unknown: "presenceUnknown"}[interval.state];
+      const start = interval.started.replace("T", " ");
+      const end = interval.last_observed.replace("T", " ");
+      element("li", intervals).textContent = `${translate(key)} · ${start}${start === end ? "" : " – " + end}`;
+    }
     events.replaceChildren();
     for (const event of data.events) {
       const row = element("li", events);

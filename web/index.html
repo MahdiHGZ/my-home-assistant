@@ -179,6 +179,10 @@
         <div class="subhead" data-i18n="target">Target</div>
         <div id="bulbGrid" class="bulb-grid"></div>
         <p class="hint" data-i18n="hint_target">Tap bulbs to target them. None selected = all.</p>
+        <div id="removedBulbSelection" hidden>
+          <span role="status"></span>
+          <button id="resetBulbSelection" type="button" class="pill" data-i18n="select_all_bulbs">Target all registered bulbs</button>
+        </div>
         <div class="btn-row wrap target-power">
           <button class="pill" id="targetsOn"><i data-icon="power"></i> <span data-i18n="on">On</span></button>
           <button class="pill danger" id="targetsOff"><i data-icon="power-off"></i> <span data-i18n="off">Off</span></button>
@@ -200,15 +204,15 @@
 
         <div class="subhead" data-i18n="brightness">Brightness</div>
         <div class="slider-row">
-          <button class="round-btn" data-light="brightness_down" aria-label="Brightness down"><i data-icon="minus"></i></button>
-          <input type="range" id="brightness" min="1" max="100" value="100" aria-label="Brightness" />
-          <button class="round-btn" data-light="brightness_up" aria-label="Brightness up"><i data-icon="plus"></i></button>
+          <button class="round-btn" data-light="brightness_down" data-i18n-label="key_bright_down" aria-label="Brightness down"><i data-icon="minus"></i></button>
+          <input type="range" id="brightness" min="1" max="100" value="100" data-i18n-label="brightness" aria-label="Brightness" />
+          <button class="round-btn" data-light="brightness_up" data-i18n-label="key_bright_up" aria-label="Brightness up"><i data-icon="plus"></i></button>
         </div>
 
         <div class="subhead" data-i18n="color">Color</div>
         <div class="btn-row wrap">
           <label class="color-pick">
-            <input type="color" id="colorPicker" value="#4cc2ff" aria-label="Pick a color" />
+            <input type="color" id="colorPicker" value="#4cc2ff" data-i18n-label="pick" aria-label="Pick a color" />
             <i data-icon="palette"></i><span data-i18n="pick">Pick</span>
           </label>
           <div id="colorChips" class="chips"></div>
@@ -217,7 +221,7 @@
         <div class="subhead" data-i18n="white_temp">White temperature</div>
         <div class="slider-row warm-cool">
           <span data-i18n="warm">Warm</span>
-          <input type="range" id="colorTemp" min="1700" max="6500" step="100" value="4000" aria-label="White temperature" />
+          <input type="range" id="colorTemp" min="1700" max="6500" step="100" value="4000" data-i18n-label="white_temp" aria-label="White temperature" />
           <span data-i18n="cool">Cool</span>
         </div>
 
@@ -274,15 +278,15 @@
         </div>
 
         <div class="subhead" data-i18n="volume">Volume</div>
-        <input type="range" id="vacVolume" min="0" max="10" step="1" value="5" aria-label="Vacuum volume" />
+        <input type="range" id="vacVolume" min="0" max="10" step="1" value="5" data-i18n-label="volume" aria-label="Vacuum volume" />
 
         <div class="subhead" data-i18n="drive">Manual drive</div>
         <div class="dpad">
-          <button class="dpad-btn up" data-vac-remote="1" aria-label="Drive forward"><i data-icon="chevron-up"></i></button>
-          <button class="dpad-btn left" data-vac-remote="2" aria-label="Turn left"><i data-icon="chevron-left"></i></button>
-          <button class="dpad-btn stop" id="dpadStop" aria-label="Stop driving"><i data-icon="square"></i></button>
-          <button class="dpad-btn right" data-vac-remote="3" aria-label="Turn right"><i data-icon="chevron-right"></i></button>
-          <button class="dpad-btn down" data-vac-remote="4" aria-label="Drive backward"><i data-icon="chevron-down"></i></button>
+          <button class="dpad-btn up" data-vac-remote="1" data-i18n-label="drive_forward" aria-label="Drive forward"><i data-icon="chevron-up"></i></button>
+          <button class="dpad-btn left" data-vac-remote="2" data-i18n-label="drive_left" aria-label="Turn left"><i data-icon="chevron-left"></i></button>
+          <button class="dpad-btn stop" id="dpadStop" data-i18n-label="drive_stop" aria-label="Stop driving"><i data-icon="square"></i></button>
+          <button class="dpad-btn right" data-vac-remote="3" data-i18n-label="drive_right" aria-label="Turn right"><i data-icon="chevron-right"></i></button>
+          <button class="dpad-btn down" data-vac-remote="4" data-i18n-label="drive_backward" aria-label="Drive backward"><i data-icon="chevron-down"></i></button>
         </div>
 
         <details id="s20Details" class="maint">
@@ -326,7 +330,7 @@
         <div id="airFan" class="btn-row wrap"></div>
 
         <div class="subhead" data-i18n="fav_speed">Favorite speed (RPM)</div>
-        <input type="range" id="airFavSpeed" min="200" max="2300" step="50" value="800" aria-label="Favorite speed" />
+        <input type="range" id="airFavSpeed" min="200" max="2300" step="50" value="800" data-i18n-label="fav_speed" aria-label="Favorite speed" />
 
         <div class="control-row">
           <label><span data-i18n="screen">Screen</span>

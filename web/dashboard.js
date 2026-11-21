@@ -42,10 +42,16 @@ const dashboardUI = (() => {
     save_scene: ["Save current scene", "ذخیرهٔ حالت فعلی"],
     library_hint: ["Saves the selected bulbs, or all when none are selected.", "لامپ‌های انتخاب‌شده را ذخیره می‌کند، یا اگر انتخابی نیست همهٔ لامپ‌ها را ذخیره می‌کند."],
     missing_bulbs: ["Removed bulbs", "لامپ‌های حذف‌شده"],
+    select_all_bulbs: ["Target all registered bulbs", "انتخاب همهٔ لامپ‌های ثبت‌شده"],
     no_bulbs: ["No bulbs registered", "لامپی ثبت نشده است"],
     fault_code: ["Fault code", "کد خطا"],
     unknown_status: ["Unknown status", "وضعیت ناشناخته"],
     advanced_settings: ["Advanced settings", "تنظیمات پیشرفته"],
+    drive_forward: ["Drive forward", "حرکت به جلو"],
+    drive_left: ["Turn left", "گردش به چپ"],
+    drive_stop: ["Stop driving", "توقف حرکت"],
+    drive_right: ["Turn right", "گردش به راست"],
+    drive_backward: ["Drive backward", "حرکت به عقب"],
   };
   const routes = {
     lights: ["lights", "#lightsCard h2"],
@@ -151,6 +157,13 @@ const dashboardUI = (() => {
     if (typeof vacuum.status === "number" && vacuum.available) {
       setStat("#statVacuum", `${t("unknown_status")} ${vacuum.status.toLocaleString(lang)}`);
     }
+    renderCapture(moments);
+    const scene = $("#overviewScene");
+    scene.disabled = !lights.available || lights.ok === false;
+    orderOverview(urgent);
+  }
+
+  function renderCapture(moments) {
     const valid = moments.latest && Number.isFinite(moments.latest_at);
     const minutes = valid ? Math.max(0, Math.floor((Date.now() / 1000 - moments.latest_at) / 60)) : 0;
     const [amount, unit] = minutes < 60 ? [minutes, "minute"]
@@ -159,9 +172,6 @@ const dashboardUI = (() => {
     const relative = new Intl.RelativeTimeFormat(lang, { numeric: "auto" });
     setStat("#statCamera", valid ? `${t("last_capture")} · ${relative.format(-amount, unit)}`
       : moments.latest ? t("last_capture") : t("no_capture"));
-    const scene = $("#overviewScene");
-    scene.disabled = !lights.available || lights.ok === false;
-    orderOverview(urgent);
   }
 
   function actionButton(label, fn) {
@@ -179,20 +189,16 @@ const dashboardUI = (() => {
   function selectBulbs(bulbs) {
     selectedBulbs.clear();
     for (const bulb of bulbs) selectedBulbs.add(bulb);
-    for (const cell of $("#bulbGrid").children) {
-      const selected = selectedBulbs.has(cell.dataset.name);
-      cell.classList.toggle("selected", selected);
-      if (cell instanceof HTMLButtonElement) cell.setAttribute("aria-pressed", String(selected));
-    }
+    renderBulbSelection();
   }
 
   function missing(entry, current) {
-    return [...new Set([...entry.missing, ...entry.bulbs.filter(bulb => !current.includes(bulb))])];
+    return entry.bulbs.filter(bulb => !current.includes(bulb));
   }
 
   function renderLibrary() {
     if (!caps) return;
-    const current = snapshot?.lights?.registered_names || caps.bulbs || [];
+    const current = caps.bulbs;
     const rows = [];
     for (const [kind, entries] of Object.entries({ group: library.groups, scene: library.scenes })) {
       for (const entry of entries) {
@@ -200,7 +206,9 @@ const dashboardUI = (() => {
         const row = element("div", "lighting-entry");
         const recall = actionButton(entry.name, async (event) => {
           if (kind === "group") {
-            selectBulbs(entry.bulbs.filter(bulb => !removed.includes(bulb)));
+            const bulbs = entry.bulbs.filter(bulb => !removed.includes(bulb));
+            if (!bulbs.length) return;
+            selectBulbs(bulbs);
             $("#targetsOn").focus();
           } else {
             const result = await act("POST", "/api/lights/library/recall", { name: entry.name }, { btn: event.currentTarget });
@@ -359,8 +367,7 @@ const dashboardUI = (() => {
     else $("#floorplanImage").removeAttribute("src");
   }
 
-  function wireRooms() {
-    positions = load(roomKey, {});
+  function updateRoomDevices() {
     roomDevices = [
       ...(caps.bulbs || []).map(bulb => ({ key: `bulb:${bulb}`, type: "lights", bulb })),
       ...["vacuum", "air", "camera"].map(type => ({ key: type, type })),
@@ -373,6 +380,11 @@ const dashboardUI = (() => {
         y: Number.isFinite(old?.y) ? old.y : 100 * (Math.floor(i / 3) + 1) / (Math.ceil(roomDevices.length / 3) + 1),
       };
     });
+  }
+
+  function wireRooms() {
+    positions = load(roomKey, {});
+    updateRoomDevices();
     $("#roomFilter").onchange = renderRooms;
     setRoomImage(load(imageKey, ""));
     $("#floorplanClear").onclick = () => { if (save(imageKey, "")) setRoomImage(""); };
@@ -418,6 +430,7 @@ const dashboardUI = (() => {
       button.setAttribute("aria-label", `${t("details")} · ${t(button.dataset.overviewDevice)}`);
     }
     if (!showTab) return;
+    renderBulbSelection();
     renderRoomFilter();
     renderRooms();
     renderKeys();
@@ -461,7 +474,7 @@ const dashboardUI = (() => {
     $("#printKeyMap").onclick = () => window.print();
     $("#lightingLibraryForm").onsubmit = async (event) => {
       event.preventDefault();
-      const bulbs = selectedBulbs.size ? [...selectedBulbs] : (snapshot?.lights?.registered_names || caps.bulbs);
+      const bulbs = selectedBulbs.size ? [...selectedBulbs] : caps.bulbs;
       if (!bulbs?.length) { toast(t("no_bulbs"), "bad"); return; }
       const name = $("#lightingName").value;
       const button = event.submitter;
@@ -478,10 +491,18 @@ const dashboardUI = (() => {
   }
 
   function render(next) {
-    const oldBulbs = snapshot?.lights?.registered_names || caps?.bulbs || [];
     if (snapshot !== next) receivedAt = Date.now();
     snapshot = next;
-    if (JSON.stringify(oldBulbs) !== JSON.stringify(next?.lights?.registered_names || caps?.bulbs || [])) renderLibrary();
+    const names = next?.lights?.registered_names;
+    if (caps && Array.isArray(names) && JSON.stringify(caps.bulbs) !== JSON.stringify(names)) {
+      caps.bulbs = names;
+      buildBulbGrid();
+      renderLights(next.lights);
+      updateRoomDevices();
+      renderRoomFilter();
+      renderRooms();
+      renderLibrary();
+    }
     renderOverview();
     applyAccent();
   }
@@ -502,5 +523,5 @@ const dashboardUI = (() => {
     });
   }
 
-  return { init, render, applyLanguage, fault, installStrings };
+  return { init, render, renderCapture, applyLanguage, fault, installStrings };
 })();

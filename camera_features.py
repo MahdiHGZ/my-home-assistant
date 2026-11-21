@@ -122,6 +122,10 @@ def _has_motion(previous, current) -> bool:
     return cv2.countNonZero(mask) >= mask.size * 0.04
 
 
+def _usable_presence_sample(sample) -> bool:
+    return bool(20 <= sample.mean() <= 235 and sample.std() >= 4)
+
+
 def _classify_presence(frame, sample, motion: bool) -> str:
     if min(frame.shape[:2]) < 64:
         return "unknown"
@@ -134,7 +138,7 @@ def _classify_presence(frame, sample, motion: bool) -> str:
         return "person"
     # Motion without a match, an under/overexposed image, and a nearly
     # uniform image cannot establish a negative observation.
-    if motion or not 20 <= sample.mean() <= 235 or sample.std() < 4:
+    if motion or not _usable_presence_sample(sample):
         return "unknown"
     return "not_detected"
 
@@ -187,12 +191,14 @@ def move_camera(body: dict) -> None:
         if client is None:
             raise ValueError("Camera movement is unsupported.")
         if "direction" in body:
+            tapo.ensure_camera_on(client)
             tapo.require_capture_allowed()
             client.moveMotorStep(_DIRECTIONS[body["direction"]])
         else:
             preset = body["preset"]
             if preset not in client.getPresets():
                 raise ValueError("Unknown camera preset.")
+            tapo.ensure_camera_on(client)
             tapo.require_capture_allowed()
             client.setPreset(preset)
     finally:
@@ -200,7 +206,7 @@ def move_camera(body: dict) -> None:
 
 
 class CameraJobs:
-    def __init__(self, stopped: threading.Event, on_moment, on_presence=lambda rule: None):
+    def __init__(self, stopped: threading.Event, on_moment, on_presence=lambda rule, settings: None):
         self.stopped = stopped
         self.on_moment = on_moment
         self.on_presence = on_presence
@@ -253,14 +259,21 @@ class CameraJobs:
         if not self._presence_tracking:
             return False
         if not capture_due and now < self._next_presence_check:
+            if motion or not _usable_presence_sample(sample):
+                self._record_presence("unknown")
             return False
         self._next_presence_check = now + _PRESENCE_INTERVAL
         start = time.process_time()
         observed = _classify_presence(frame, sample, motion)
         elapsed = round(1000 * (time.process_time() - start), 1)
-        with self._lock:
-            self._classification_ms = elapsed
-        self._record_presence(observed)
+        with camera_policy.lock:
+            tapo.require_capture_allowed()
+            if not camera_policy.read(tapo.MOMENTS_DIR)["motion"]:
+                self._break_observation()
+                return False
+            with self._lock:
+                self._classification_ms = elapsed
+            self._record_presence(observed)
         return observed == "person"
 
     @staticmethod
@@ -317,7 +330,11 @@ class CameraJobs:
                     if self.stopped.is_set() or self._sweep_cancel.is_set():
                         state = "cancelled"
                         return
+                    tapo.ensure_camera_on(client)
                     tapo.require_capture_allowed()
+                    if self.stopped.is_set() or self._sweep_cancel.is_set():
+                        state = "cancelled"
+                        return
                     client.setPreset(preset)
                     if self._sweep_cancel.wait(2) or self.stopped.is_set():
                         state = "cancelled"
@@ -424,7 +441,7 @@ class CameraJobs:
                         try:
                             tapo.require_capture_allowed()
                             if camera_policy.read(tapo.MOMENTS_DIR) == settings:
-                                self.on_presence(rule)
+                                self.on_presence(rule, settings)
                                 event["outcome"] = "applied"
                         except Exception:
                             event["outcome"] = "failed"

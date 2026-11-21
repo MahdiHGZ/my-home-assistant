@@ -190,6 +190,7 @@ function applyLang() {
   document.documentElement.dir = lang === "fa" ? "rtl" : "ltr";
   document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-ph]").forEach((el) => { el.placeholder = t(el.dataset.i18nPh); });
+  document.querySelectorAll("[data-i18n-label]").forEach((el) => el.setAttribute("aria-label", t(el.dataset.i18nLabel)));
   $("#langBtn").textContent = lang === "fa" ? "EN" : "FA";
   if (caps) {
     buildDynamic();
@@ -334,6 +335,18 @@ function targets() {
   return selectedBulbs.size ? [...selectedBulbs] : "all";
 }
 
+function renderBulbSelection() {
+  const removed = [...selectedBulbs].filter(name => !caps.bulbs.includes(name));
+  const notice = $("#removedBulbSelection");
+  notice.hidden = !removed.length;
+  notice.querySelector("span").textContent = removed.length ? `${t("missing_bulbs")} · ${removed.join(", ")}` : "";
+  for (const cell of $("#bulbGrid").querySelectorAll("button")) {
+    const selected = selectedBulbs.has(cell.dataset.name);
+    cell.classList.toggle("selected", selected);
+    cell.setAttribute("aria-pressed", String(selected));
+  }
+}
+
 // --- color helpers -----------------------------------------------------------
 
 function rgbIntToHex(n) {
@@ -394,6 +407,7 @@ function buildBulbGrid() {
   grid.innerHTML = "";
   if (!caps.bulbs.length) {
     grid.append(element("p", "hint", t("no_bulbs")));
+    renderBulbSelection();
     return;
   }
   caps.bulbs.forEach((name) => {
@@ -401,16 +415,21 @@ function buildBulbGrid() {
     cell.className = "bulb off";
     cell.dataset.name = name;
     cell.append(element("span", "dot"), element("span", "name", name), element("span", "meta", "—"));
-    cell.setAttribute("aria-pressed", String(selectedBulbs.has(name)));
-    cell.classList.toggle("selected", selectedBulbs.has(name));
     cell.onclick = () => {
-      if (selectedBulbs.has(name)) selectedBulbs.delete(name);
+      let hadRemoved = false;
+      for (const selected of selectedBulbs) {
+        if (!caps.bulbs.includes(selected)) {
+          selectedBulbs.delete(selected);
+          hadRemoved = true;
+        }
+      }
+      if (selectedBulbs.has(name) && !hadRemoved) selectedBulbs.delete(name);
       else selectedBulbs.add(name);
-      cell.classList.toggle("selected", selectedBulbs.has(name));
-      cell.setAttribute("aria-pressed", String(selectedBulbs.has(name)));
+      renderBulbSelection();
     };
     grid.appendChild(cell);
   });
+  renderBulbSelection();
 }
 
 function buildSelect(el, options) {
@@ -713,6 +732,8 @@ async function deleteMoment(src) {
     $("#momentLatest").dataset.src = "";
     $("#momentGallery").dataset.key = "";
     renderMoments(res);
+    if (lastStatus) lastStatus.moments = res;
+    if (typeof dashboardUI !== "undefined") dashboardUI.renderCapture(res);
   } catch (e) {
     deletePassword = null; // wrong password (or other failure): ask again next time
     toast(e.message, "bad");
@@ -825,6 +846,11 @@ function brightnessSender() {
 }
 
 function wireEvents() {
+  $("#resetBulbSelection").onclick = () => {
+    selectedBulbs.clear();
+    renderBulbSelection();
+    $("#targetsOn").focus();
+  };
   // Lights actions (delegated)
   document.addEventListener("click", (e) => {
     const p = e.target.closest("[data-pattern]");
@@ -836,6 +862,9 @@ function wireEvents() {
     if (!tEl) return;
     const action = tEl.dataset.light;
     const body = { action };
+    if (selectedBulbs.size && (action === "brightness_up" || action === "brightness_down")) {
+      body.targets = targets();
+    }
     if (action === "mode") {
       body.mode = tEl.dataset.mode;
       const scene = caps?.scene_modes?.find(mode => mode.key === body.mode);
@@ -1378,7 +1407,7 @@ function initTabs() {
   let current = "home", homeScroll = 0, homeFocus = null;
   const tabs = document.querySelectorAll(".nav-tab");
   const cards = {
-    home: ["#overviewAttention", ".dashboard", "#panelAlertCard", "#routinesCard", "#preferencesCard"],
+    home: ["#overviewAttention", ".dashboard", "#cleaningAirCard", "#panelAlertCard", "#routinesCard", "#preferencesCard"],
     lights: ["#lightsCard"],
     appliances: ["#vacuumCard", "#airCard"],
     camera: ["#cameraCard"],

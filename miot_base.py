@@ -91,7 +91,7 @@ class MiotHelper:
     def reconfigure(self, ip: str, token: str, fields: dict[str, str]) -> None:
         # A running operation owns its device handle until it returns. Future
         # calls construct a new transport under the same cache lock.
-        with self._lock:
+        with self._io_lock, self._lock:
             if self.ip != ip or self.token != token:
                 self.ip, self.token, self.env_vars = ip, token, fields
                 self._device = None

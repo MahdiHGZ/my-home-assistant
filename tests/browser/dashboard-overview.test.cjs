@@ -74,6 +74,7 @@ test("overview pause and advanced settings retain the home context in English an
     doc.activeElement.click();
     assert.equal(doc.activeElement, $("#s20Details summary"));
     assert.equal($("#s20Details").open, true);
+    assert.equal($("#cleaningAirCard").classList.contains("tab-hidden"), true);
     $("[data-tab='home']").click();
     assert.equal(doc.activeElement, advanced);
     await settled();
@@ -127,6 +128,29 @@ test("saved groups and the room list send only the selected bulb and preserve pl
   assert.equal($("#roomMarkers button").style.left, "63%");
   $("#roomDeviceList [aria-label='B1 · Off']").click();
   assert.deepEqual(calls.at(-1), ["/api/lights/control", { targets: ["B1"], power: false }]);
+});
+
+test("relative brightness keeps its explicit bulb targets after membership changes", async t => {
+  const { window, doc, calls } = load(t, "fa");
+  const $ = selector => doc.querySelector(selector);
+  await settled();
+  $("#lightingEntries button").click();
+  const brighter = $("[data-light='brightness_up']");
+  assert.equal(brighter.getAttribute("aria-label"), "افزایش روشنایی");
+  brighter.click();
+  assert.deepEqual(calls.at(-1), ["/api/lights/action", { action: "brightness_up", targets: ["B1"] }]);
+  const status = snapshot();
+  status.lights.registered_names = ["B2", "B3"];
+  window.receiveStatus(status);
+  assert.deepEqual([...doc.querySelectorAll("#bulbGrid button")].map(button => button.dataset.name), ["B2", "B3"]);
+  assert.equal($("#roomDeviceList button").textContent, "B2");
+  assert.match($("#removedBulbSelection").textContent, /B1/);
+  assert.equal($("#lightingEntries button").disabled, true);
+  brighter.click();
+  assert.deepEqual(calls.at(-1), ["/api/lights/action", { action: "brightness_up", targets: ["B1"] }]);
+  $("#bulbGrid [data-name='B3']").click();
+  brighter.click();
+  assert.deepEqual(calls.at(-1), ["/api/lights/action", { action: "brightness_up", targets: ["B3"] }]);
 });
 
 test("keyboard help is built from live bindings and preferences persist", async t => {

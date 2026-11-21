@@ -15,6 +15,7 @@ import numpy as np
 
 import camera_features as features
 import camera_policy as policy
+import main
 import tapo_camera_utils as tapo
 import web_server
 
@@ -159,7 +160,58 @@ class CameraFeatureTests(unittest.TestCase):
             ("person", "applied"), ("unclassified", "notified"),
         ])
         self.assertEqual(self.on_moment.call_count, 2)
-        self.on_presence.assert_called_once_with("lights_on")
+        self.on_presence.assert_called_once_with("lights_on", settings)
+
+    def test_presence_requires_two_valid_quiet_negatives_and_breaks_on_missing_frames(self):
+        settings = self.configure(motion=True, presence_rule="vacuum_pause")
+        baseline = np.full((180, 240, 3), 60, np.uint8)
+        baseline[:, 90:150] = 160
+        person = baseline.copy()
+        person[20:135, 30:180] = 210
+        frames = [baseline, person, person, person, person, person, baseline,
+                  tapo.TapoError("offline"), baseline]
+        with (
+            mock.patch.object(features, "_fresh_frame", side_effect=frames),
+            mock.patch.object(features.time, "monotonic", side_effect=(0, 2, 12, 22, 32, 42, 44, 46, 48)),
+            mock.patch.object(tapo, "_detect_people", side_effect=[(1, 0), (1, 0), (0, 0), (0, 0), (0, 0)]),
+        ):
+            self.assertTrue(self.jobs._tick(settings))
+            self.assertFalse(self.jobs.status(settings)["presence"]["intervals"])
+            self.assertTrue(self.jobs._tick(settings))
+            self.assertEqual(self.jobs.status(settings)["presence"]["intervals"][0]["state"], "person")
+            self.assertTrue(self.jobs._tick(settings))
+            last_seen = self.jobs.status(settings)["presence"]["last_seen"]
+            self.assertIsNotNone(last_seen)
+            self.assertTrue(self.jobs._tick(settings))
+            self.assertEqual(self.jobs.status(settings)["presence"]["intervals"][0]["state"], "unknown")
+            self.assertTrue(self.jobs._tick(settings))
+            self.assertTrue(self.jobs._tick(settings))
+            self.assertEqual(self.jobs.status(settings)["presence"]["intervals"][0]["state"], "not_detected")
+            self.assertTrue(self.jobs._tick(settings))  # unclassified motion during cooldown
+            self.assertFalse(self.jobs._tick(settings))  # endpoint unavailable
+            self.assertTrue(self.jobs._tick(settings))  # recovery starts a fresh baseline
+        presence = self.jobs.status(settings)["presence"]
+        self.assertEqual(presence["last_seen"], last_seen)
+        self.assertEqual([interval["state"] for interval in presence["intervals"]],
+                         ["unknown", "not_detected", "unknown", "person"])
+        self.on_presence.assert_called_once_with("vacuum_pause", settings)
+
+    def test_presence_history_is_bounded(self):
+        for _ in range(features._MAX_EVENTS):
+            self.jobs._record_presence("person")
+            self.jobs._record_presence("unknown")
+        history = self.jobs.status(policy.DEFAULT)["presence"]
+        self.assertEqual(len(history["intervals"]), features._MAX_EVENTS)
+        self.assertEqual(history["intervals"][0]["state"], "unknown")
+        self.assertIsNotNone(history["last_seen"])
+
+    def test_detector_error_and_unusable_picture_are_unknown(self):
+        dark = features._motion_sample(self.frame)
+        with mock.patch.object(tapo, "_detect_people", return_value=(0, 0)):
+            self.assertEqual(features._classify_presence(self.frame, dark, False), "unknown")
+        bright = features._motion_sample(self.changed)
+        with mock.patch.object(tapo, "_detect_people", side_effect=tapo.TapoError("detector")):
+            self.assertEqual(features._classify_presence(self.changed, bright, False), "unknown")
 
     def test_preview_does_not_save_and_export_skips_missed_frame(self):
         settings = self.configure(timelapse_minutes=1)
@@ -216,3 +268,56 @@ class CameraFeatureTests(unittest.TestCase):
         self.assertEqual(len(state["moments"]), 2)
         self.assertNotEqual(*state["moments"])
         self.assertEqual(self.on_moment.call_count, 2)
+
+    def test_sweep_rechecks_hardware_privacy_before_each_move(self):
+        client = mock.Mock()
+        client.getPrivacyMode.side_effect = [
+            {"enabled": "off"}, {"enabled": "off"}, {"enabled": "on"},
+        ]
+        client.getMotorCapability.return_value = {"error_code": 0, "motor": {"capability": {"relative": 1}}}
+        client.getPresets.return_value = {"1": "Door", "2": "Hall"}
+        with (
+            mock.patch.object(tapo, "get_client", return_value=client),
+            mock.patch.object(features, "_fresh_frame", return_value=self.frame),
+            mock.patch.object(self.jobs._sweep_cancel, "wait", return_value=False),
+        ):
+            self.jobs._run_sweep(["1", "2"])
+        client.setPreset.assert_called_once_with("1")
+        self.assertEqual(self.jobs.status(policy.DEFAULT)["sweep"]["state"], "cancelled")
+
+    def test_queued_presence_action_rechecks_consent_before_dispatch(self):
+        settings = self.configure(motion=True, presence_rule="lights_on")
+        server = mock.Mock(stopped=threading.Event(), household=None)
+        lights = mock.Mock()
+
+        def queued_lights(controller, body, *, before_control):
+            self.configure(motion=True, presence_rule="notify")
+            before_control()
+            return lights()
+
+        with (
+            mock.patch.object(web_server, "_lights_control", side_effect=queued_lights),
+            mock.patch.object(tapo, "get_client"),
+            mock.patch.object(tapo, "ensure_camera_on"),
+        ):
+            with self.assertRaises(tapo.CameraPrivateError):
+                web_server._BoundedThreadingHTTPServer.camera_presence(server, "lights_on", settings)
+        lights.assert_not_called()
+
+    def test_flash_restores_lights_if_privacy_changes_after_blink(self):
+        bulbs = {"I1": "local"}
+        original = {"I1": {"power": "on"}}
+        camera = mock.Mock()
+        with (
+            mock.patch.object(main.yeelight_bulb_utils, "read_state", return_value=original),
+            mock.patch.object(main.yeelight_bulb_utils, "full_off",
+                              side_effect=lambda bulbs: self.configure(override="private")),
+            mock.patch.object(main.yeelight_bulb_utils, "apply_mode") as flash,
+            mock.patch.object(main.yeelight_bulb_utils, "apply_state") as restore,
+            mock.patch.object(main.time, "sleep"),
+        ):
+            with self.assertRaises(tapo.CameraPrivateError):
+                main._capture(bulbs, flash=True, cap=camera)
+        flash.assert_not_called()
+        camera.read.assert_not_called()
+        restore.assert_called_once_with(bulbs, original)

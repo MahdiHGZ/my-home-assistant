@@ -148,7 +148,37 @@ def ensure_camera_on(client: Tapo) -> None:
         raise CameraPrivacyCheckError("The camera returned an unknown privacy state.")
 
 
-def connect(substream: bool = False) -> cv2.VideoCapture | None:
+_last_connection = None
+
+
+def availability() -> dict:
+    config = credentials()
+    if not all(config[:3]):
+        return {"available": False, "reason": "unconfigured"}
+    previous = _last_connection
+    if previous and previous[0] is config and time.monotonic() - previous[1] <= 120:
+        return {"available": previous[2]}
+    return {"available": None}
+
+
+def connect(substream: bool = False, *, config=None, client=None) -> cv2.VideoCapture | None:
+    global _last_connection
+    config = credentials() if config is None else config
+    try:
+        cap = _connect(config, substream, client)
+    except CameraPrivateError:
+        # Privacy is an intentional operating state, and checking it must never
+        # cause the dashboard to open another connection.
+        _last_connection = (config, time.monotonic(), None)
+        raise
+    except Exception:
+        _last_connection = (config, time.monotonic(), False)
+        raise
+    _last_connection = (config, time.monotonic(), cap is not None)
+    return cap
+
+
+def _connect(config, substream: bool, client=None) -> cv2.VideoCapture | None:
     """Opens an RTSP video stream to the Tapo camera.
 
     Args:
@@ -160,9 +190,8 @@ def connect(substream: bool = False) -> cv2.VideoCapture | None:
     """
     _require_dependencies()
     require_capture_allowed()
-    config = credentials()
     host, user, password, _ = config
-    ensure_camera_on(get_client(config))
+    ensure_camera_on(get_client(config) if client is None else client)
     require_capture_allowed()
     stream = "stream2" if substream else "stream1"
     rtsp_url = f"rtsp://{quote(user, safe='')}:{quote(password, safe='')}@{host}:554/{stream}"
@@ -442,6 +471,8 @@ def _detect_people(frame, *, require_complete: bool = False) -> tuple[int, int]:
     h, w = frame.shape[:2]
     scale = 320.0 / float(w) if w > 320 else 1.0
     small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale != 1.0 else frame
+    if require_complete and (small.shape[0] < 128 or small.shape[1] < 64):
+        raise TapoError("Camera frame is too small for a complete person observation.")
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
 
     people = 0

@@ -156,11 +156,17 @@ def _capture(bulbs: dict[str, str], *, flash: bool, cap=None, countdown=False) -
         raise tapo_camera_utils.TapoError("Camera connection failed.")
 
     snapshot = None
+    lighting_changed = False
     try:
         if flash:
+            tapo_camera_utils.require_capture_allowed()
             snapshot = yeelight_bulb_utils.read_state(bulbs)
             if countdown:
+                tapo_camera_utils.require_capture_allowed()
+                lighting_changed = True
                 yeelight_bulb_utils.run_row_pair_sweep_count(bulbs)
+            tapo_camera_utils.require_capture_allowed()
+            lighting_changed = True
             _prepare_flash_lighting(bulbs)
         image_path = tapo_camera_utils.capture_moment(cap)
         if image_path is None:
@@ -169,7 +175,7 @@ def _capture(bulbs: dict[str, str], *, flash: bool, cap=None, countdown=False) -
     finally:
         if own_connection:
             cap.release()
-        if snapshot is not None:
+        if lighting_changed and snapshot is not None:
             yeelight_bulb_utils.apply_state(bulbs, snapshot)
 
 
@@ -177,6 +183,7 @@ def _prepare_flash_lighting(bulbs: dict[str, str]) -> None:
     """Creates a quick blink before full-on flash lighting."""
     yeelight_bulb_utils.full_off(bulbs)
     time.sleep(_FLASH_BLINK_OFF_S)
+    tapo_camera_utils.require_capture_allowed()
     # Transient capture lighting — don't save it as the bulbs' power-on
     # default; the real state is restored (and persisted) afterward.
     yeelight_bulb_utils.apply_mode(bulbs, MODES["full_on"], persist=False)
@@ -490,8 +497,13 @@ class Controller(LightActions):
         """Web-only: jump straight to a dance pattern by index."""
         yeelight_bulb_utils.set_party_pattern(index)
 
-    def _do_brightness(self, step: int) -> None:
+    def _do_brightness(self, step: int, targets: list[str] | None = None) -> None:
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
+        if targets is not None:
+            selected = {name: bulbs[name] for name in targets if name in bulbs}
+            if not selected or len(selected) != len(set(targets)):
+                raise ValueError("One or more selected bulbs are no longer registered.")
+            bulbs = selected
         if yeelight_bulb_utils.is_party_running():
             yeelight_bulb_utils.stop_party_dance()
         logger.info("Brightness step %+d.", step)
@@ -530,6 +542,7 @@ class Controller(LightActions):
         power: bool | None = None,
         brightness: int | None = None,
         color: str | None = None,
+        before_control=None,
     ) -> dict[str, object]:
         """Web-only direct control: power, brightness and arbitrary colors.
 
@@ -538,6 +551,8 @@ class Controller(LightActions):
         the undo stack.
         """
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
+        if before_control is not None:
+            before_control()
         if yeelight_bulb_utils.is_party_running() and (
             power is not None or brightness is not None or color is not None
         ):
@@ -573,19 +588,25 @@ class Controller(LightActions):
         return Path(captured["image_path"])
 
     def _prepare_capture(self, *, flash: bool, countdown=False):
-        cap = tapo_camera_utils.connect()
+        tapo_camera_utils.require_capture_allowed()
+        config = tapo_camera_utils.credentials()
+        client = tapo_camera_utils.get_client(config)
+        cap = tapo_camera_utils.connect(config=config, client=client)
         if cap is None:
             raise tapo_camera_utils.TapoError("Camera connection failed.")
         try:
             # The camera lane retains ownership until the exposure job has
             # completed or been cancelled, including during service shutdown.
-            return self.run_action(self._expose, cap, flash=flash, countdown=countdown,
+            return self.run_action(self._expose, cap, client, flash=flash, countdown=countdown,
                                    retry=False, timeout=None)
         finally:
             cap.release()
 
-    def _expose(self, cap, *, flash, countdown):
+    def _expose(self, cap, client, *, flash, countdown):
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
+        tapo_camera_utils.require_capture_allowed()
+        tapo_camera_utils.ensure_camera_on(client)
+        tapo_camera_utils.require_capture_allowed()
         if yeelight_bulb_utils.is_party_running():
             yeelight_bulb_utils.stop_party_dance()
         return _capture(bulbs, flash=flash, cap=cap, countdown=countdown)
