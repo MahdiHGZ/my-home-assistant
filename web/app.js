@@ -80,6 +80,9 @@ const AIR_MODE_ICONS = { auto: "fan", sleep: "moon", favorite: "heart", manual: 
 
 const I18N = {
   en: {
+    routines: "Routines", edit_routine: "Create or edit a routine", routine_name: "Name", daily_at: "Daily time (optional, server time)",
+    add_step: "Add step", save: "Save", recent_runs: "Recent runs", air_history: "Air quality over 24 hours", hour: "Hour",
+    empty_samples: "No readings yet", no_runs: "No runs yet", run: "Run", edit: "Edit", remove: "Remove", failed: "Failed", pending: "Pending",
     home: "Home", devices: "Devices",
     sub: "LAN home control", live: "live", offline: "offline", loading: "Loading…",
     lights: "Lights", vacuum: "Vacuum", air: "Air", air_purifier: "Air purifier",
@@ -116,6 +119,9 @@ const I18N = {
     panel_send_alert: "Alert", panel_alert_sent: "Sent to the panel",
   },
   fa: {
+    routines: "روال‌ها", edit_routine: "ساخت یا ویرایش روال", routine_name: "نام", daily_at: "زمان روزانه (اختیاری، ساعت سرور)",
+    add_step: "افزودن گام", save: "ذخیره", recent_runs: "اجراهای اخیر", air_history: "کیفیت هوا در ۲۴ ساعت", hour: "ساعت",
+    empty_samples: "هنوز داده‌ای نیست", no_runs: "هنوز اجرایی نیست", run: "اجرا", edit: "ویرایش", remove: "حذف", failed: "ناموفق", pending: "در انتظار",
     home: "خانه", devices: "دستگاه‌ها",
     sub: "کنترل خانه در شبکه محلی", live: "زنده", offline: "آفلاین", loading: "در حال بارگذاری…",
     lights: "چراغ‌ها", vacuum: "جاروبرقی", air: "هوا", air_purifier: "تصفیه هوا",
@@ -198,12 +204,25 @@ async function api(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
+  const retriable = method === "POST" && body?.action !== "remote" &&
+    /^\/api\/(lights\/(control|action)|purifier\/action|vacuum\/action|camera\/(capture|delete)|routines\/run)$/.test(path);
+  if (retriable) {
+    opts.headers["Idempotency-Key"] = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      byte => byte.toString(16).padStart(2, "0")).join("");
+  }
   const timeout = path.includes("/chat") ? 180000 :
     path.includes("/camera/capture") ? 100000 : method === "POST" ? 65000 : 16000;
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), timeout);
   try {
-    const res = await fetch(path, { ...opts, signal: deadline.signal });
+    const send = () => fetch(path, { ...opts, signal: deadline.signal });
+    let res;
+    try {
+      res = await send();
+    } catch (error) {
+      if (!retriable || deadline.signal.aborted) throw error;
+      res = await send();
+    }
     if (!res.ok && !res.headers.get("Content-Type")?.includes("application/json")) {
       throw new Error(`Request failed (${res.status})`);
     }
@@ -225,7 +244,7 @@ async function waitForJob(id) {
   while (Date.now() < until) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     const { job } = await api("GET", "/api/actions/" + id);
-    if (job.status === "done") return { ok: true };
+    if (job.status === "done") return job.result || { ok: true };
     if (job.status === "failed" || job.status === "cancelled") {
       throw new Error(job.error || "Action failed.");
     }
@@ -1170,12 +1189,131 @@ async function readChatStream(res, pending, ticker, log, resetDeadline) {
   if (!answer) pending.textContent = "(no response)";
 }
 
+function wireHousehold(actions) {
+  const picker = $("#routineAction"), params = $("#routineParams");
+  let steps = [];
+  const button = (key, click) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "pill";
+    b.textContent = t(key);
+    b.onclick = click;
+    return b;
+  };
+  const label = step => [t(step.device === "purifier" ? "air_purifier" : step.device),
+    t(step.action).replaceAll("_", " "), step.mode ?? step.value].filter(x => x != null).join(" · ");
+  const showSteps = () => {
+    $("#routineSteps").replaceChildren(...steps.map((step, i) => {
+      const li = document.createElement("li");
+      li.append(label(step), " ", button("remove", () => { steps.splice(i, 1); showSteps(); }));
+      return li;
+    }));
+  };
+  picker.replaceChildren(...actions.map((a, i) => new Option(label(a), String(i))));
+  function showParams() {
+    params.replaceChildren();
+    for (const [key, schema] of Object.entries(actions[picker.value]?.fields || {})) {
+      let field;
+      if (schema.enum || schema.type === "boolean") {
+        field = document.createElement("select");
+        for (const value of schema.enum || [true, false]) field.add(new Option(String(value), String(value)));
+      } else {
+        field = document.createElement("input");
+        field.type = schema.type === "integer" ? "number" : "text";
+        if (schema.minimum != null) field.min = schema.minimum;
+        if (schema.maximum != null) field.max = schema.maximum;
+        field.value = schema.minimum ?? "";
+      }
+      field.dataset.key = key;
+      field.setAttribute("aria-label", key);
+      params.append(field);
+    }
+  }
+  picker.onchange = showParams;
+  showParams();
+  $("#routineAdd").onclick = () => {
+    const a = actions[picker.value];
+    if (!a || steps.length >= 16) return;
+    const step = { device: a.device, action: a.action };
+    for (const field of params.children) {
+      const key = field.dataset.key, type = a.fields[key].type;
+      if (!field.value || !field.reportValidity()) return;
+      step[key] = type === "integer" ? Number(field.value) : type === "boolean" ? field.value === "true" : field.value;
+    }
+    steps.push(step);
+    showSteps();
+  };
+  async function refresh() {
+    try {
+      const { routines, runs } = await api("GET", "/api/routines");
+      $("#routineList").replaceChildren(...routines.map(r => {
+        const row = document.createElement("div");
+        row.className = "btn-row wrap";
+        row.append(r.name + (r.schedule ? " · " + r.schedule : ""), button("run", async e => {
+          const b = e.currentTarget;
+          b.disabled = true;
+          try {
+            const result = await api("POST", "/api/routines/run", {name: r.name});
+            toast(t(result.complete ? "done" : "failed"), result.complete ? "good" : "bad");
+            $("#runHistory").open = true;
+            await refresh();
+          } catch (err) { toast(err.message, "bad"); }
+          finally { b.disabled = false; }
+        }), button("edit", () => {
+          $("#routineEditor").open = true;
+          $("#routineName").value = r.name;
+          $("#routineTime").value = r.schedule || "";
+          steps = r.steps.slice();
+          showSteps();
+        }), button("delete", async () => {
+          if (!confirm(t("delete") + " " + r.name + "?")) return;
+          try { await api("POST", "/api/routines/delete", {name: r.name}); await refresh(); }
+          catch (err) { toast(err.message, "bad"); }
+        }));
+        return row;
+      }));
+      $("#runResults").replaceChildren(...runs.map(r => {
+        const entry = document.createElement("p");
+        entry.textContent = r.name + " · " + new Date(r.ts * 1000).toLocaleString(lang) +
+          " — " + r.outcomes.map(s => label(s) + " (" + t(s.status) + ")").join(", ");
+        return entry;
+      }));
+      if (!runs.length) $("#runResults").textContent = t("no_runs");
+    } catch (err) { toast(err.message, "bad"); }
+  }
+  $("#routineForm").onsubmit = async e => {
+    e.preventDefault();
+    try {
+      await api("POST", "/api/routines/save", {name: $("#routineName").value, steps, schedule: $("#routineTime").value});
+      steps = []; showSteps(); $("#routineForm").reset(); showParams(); $("#routineEditor").open = false;
+      await refresh();
+    } catch (err) { toast(err.message, "bad"); }
+  };
+  $("#runHistory").ontoggle = () => { if ($("#runHistory").open) refresh(); };
+  refresh();
+  $("#airHistory").ontoggle = async () => {
+    if (!$("#airHistory").open) return;
+    try {
+      const { hours } = await api("GET", "/api/history");
+      $("#airHours").replaceChildren(...hours.map(h => {
+        const row = document.createElement("tr");
+        const stamp = new Date(h.ts * 1000).toLocaleTimeString(lang, {hour: "2-digit", minute: "2-digit"});
+        for (const val of [stamp, h.pm25, h.temperature, h.humidity]) {
+          row.insertCell().textContent = typeof val === "number" ? val.toLocaleString(lang, {maximumFractionDigits: 1}) : val ?? "—";
+        }
+        return row;
+      }));
+      $("#airHistoryStatus").textContent = hours.length ? "" : t("empty_samples");
+    } catch (err) { $("#airHistoryStatus").textContent = err.message; }
+  };
+}
+
 // --- tab routing for mobile bottom nav ---------------------------------------
 
 function initTabs() {
   const tabs = document.querySelectorAll(".nav-tab");
   const cards = {
-    home: [".dashboard", "#panelAlertCard"],
+    home: [".dashboard", "#panelAlertCard", "#routinesCard"],
     lights: ["#lightsCard"],
     appliances: ["#vacuumCard", "#airCard"],
     camera: ["#cameraCard"],
@@ -1250,6 +1388,7 @@ async function init() {
     if (chatTab) chatTab.classList.add("hidden");
   }
 
+  wireHousehold(caps.actions || []);
   initTabs();
 
   connectEvents();       // live pushes; falls back to polling on failure

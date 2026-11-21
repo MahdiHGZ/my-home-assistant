@@ -28,3 +28,6 @@ brain_model/
 **/preview/
 tools/host_preview/build/
 /tests/browser/node_modules/
+
+# Household state
+/coukab.sqlite3*

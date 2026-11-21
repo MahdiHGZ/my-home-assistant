@@ -51,6 +51,26 @@
         </article>
       </section>
 
+      <section class="card" id="routinesCard">
+        <div class="card-head"><h2 data-i18n="routines">Routines</h2></div>
+        <div id="routineList"></div>
+        <details id="routineEditor">
+          <summary data-i18n="edit_routine">Create or edit a routine</summary>
+          <form id="routineForm">
+            <label><span data-i18n="routine_name">Name</span> <input id="routineName" maxlength="64" required /></label>
+            <label><span data-i18n="daily_at">Daily time (optional, server time)</span> <input id="routineTime" type="time" /></label>
+            <ol id="routineSteps"></ol>
+            <select id="routineAction" aria-label="Device action"></select>
+            <span id="routineParams"></span>
+            <div class="btn-row wrap">
+              <button class="pill" type="button" id="routineAdd" data-i18n="add_step">Add step</button>
+              <button class="pill" type="submit" data-i18n="save">Save</button>
+            </div>
+          </form>
+        </details>
+        <details id="runHistory"><summary data-i18n="recent_runs">Recent runs</summary><div id="runResults"></div></details>
+      </section>
+
       <!-- Touch-panel alert -->
       <section class="card" id="panelAlertCard">
         <div class="card-head"><h2><i data-icon="bell"></i> <span data-i18n="panel_alert">Panel alert</span></h2></div>
@@ -180,6 +200,12 @@
         <div class="card-head"><h2><i data-icon="wind"></i> <span data-i18n="air_purifier">Air purifier</span></h2></div>
         <div id="airReadout" class="readout">—</div>
 
+        <details id="airHistory">
+          <summary data-i18n="air_history">Air quality over 24 hours</summary>
+          <table><thead><tr><th data-i18n="hour">Hour</th><th>PM2.5 (µg/m³)</th><th>°C</th><th>% RH</th></tr></thead>
+            <tbody id="airHours"></tbody></table>
+          <p id="airHistoryStatus" role="status"></p>
+        </details>
         <div class="btn-row wrap">
           <button class="pill" data-air-power="on"><i data-icon="power"></i> <span data-i18n="on">On</span></button>
           <button class="pill danger" data-air-power="off"><i data-icon="power-off"></i> <span data-i18n="off">Off</span></button>

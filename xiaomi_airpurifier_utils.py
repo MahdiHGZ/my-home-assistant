@@ -227,6 +227,10 @@ def turn_off(device=None) -> Any:
     return _set_prop(device, "power", False)
 
 
+def set_power(enabled: bool, device=None) -> Any:
+    return turn_on(device) if enabled else turn_off(device)
+
+
 def toggle(device=None) -> Any:
     """Toggles the air purifier power."""
     device = _ensure(device)

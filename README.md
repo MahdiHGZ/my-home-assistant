@@ -1,7 +1,7 @@
 # Coukab LAN
 
 Local-network home-automation controller. A numeric keypad (read via evdev)
-**and** a beautiful, no-login glassmorphic web dashboard drive Yeelight bulbs,
+**and** a web dashboard drive Yeelight bulbs,
 a Xiaomi S20 vacuum, a Xiaomi Air Purifier 4 Lite, and a TP-Link Tapo camera —
 all over the LAN, no cloud required. The web UI is fully optimized for mobile
 viewports via bottom-nav tabs, and desktop viewports via responsive multi-column
@@ -102,7 +102,7 @@ If the keypad device can't be opened, the web interface **keeps running anyway**
 ## Connecting to the web page
 
 The web page runs on the machine where `main.py` is running. Open it from any
-device on the **same Wi-Fi / LAN** — there is no login.
+device on the **same Wi-Fi / LAN**. The default trusted-LAN mode opens directly.
 
 **1. Make sure both devices are on the same network.** Your phone/laptop and the
 machine running `main.py` must be on the same router/Wi-Fi.
@@ -110,7 +110,7 @@ machine running `main.py` must be on the same router/Wi-Fi.
 **2. Find the address.** When `main.py` starts it prints the URL, e.g.:
 
 ```
-Web interface: http://0.0.0.0:8080  (open http://192.168.1.42:8080 on your phone) — no login.
+Web interface: http://0.0.0.0:8080  (open http://192.168.1.42:8080 on your phone).
 ```
 
 Use the `192.168.x.x` address (not `0.0.0.0`). If you missed it, find the
@@ -129,8 +129,7 @@ ip -4 addr show | grep inet         # Linux: list all addresses
 http://<that-ip>:8080
 ```
 
-For example `http://192.168.1.42:8080`. That's it — the dashboard loads
-immediately, no password.
+For example `http://192.168.1.42:8080`. The dashboard opens in your browser.
 
 **Tip:** on a phone, use the browser's **"Add to Home Screen"** to get an
 app-style icon that opens straight to the controls.
@@ -145,9 +144,22 @@ app-style icon that opens straight to the controls.
 | Port already in use | Another program holds `8080` — start with `--web-port 9000` (or any free port). |
 | Page loads but a device says "offline" | Check that device's IP/token in `.env`, that it's powered on, and that it's on the same LAN. |
 
-> **Security note:** the web interface is intentionally unauthenticated. Only run
-> it on a trusted home LAN (the default `--web-host 0.0.0.0` listens on all
-> interfaces). Use `--web-host 127.0.0.1` to keep it on the host only.
+### Access and firmware updates
+
+On a trusted home LAN, leave the four `COUKAB_*_PASSWORD` settings empty. The server listens on all interfaces by default. Use `--web-host 127.0.0.1` to bind to loopback.
+
+To require authentication, set `COUKAB_BROWSER_PASSWORD` in `.env` and restart the service. Log in as `browser` using the browser's HTTP Basic prompt. Authentication covers the dashboard, API, streams, and camera files. Basic credentials travel with requests, so use an HTTPS reverse proxy on an untrusted network. Browser mutations accept the request host as their origin by default. Behind a proxy, set `COUKAB_ALLOWED_ORIGINS` to the exact comma-separated external origins.
+
+Clients that send Basic credentials can use the separate `panel` username and `COUKAB_PANEL_PASSWORD`. The stock touch firmware uses trusted-LAN mode. Enabling authentication requires an authenticating intermediary for that firmware. To rotate either password, put the old value in its `_PREVIOUS` setting, set the new current password, restart, migrate clients, then clear the previous value and restart again.
+
+Firmware OTA starts only when the sketch has a non-empty `OTA_PASSWORD` defined in `secrets.h`. USB flashing works with OTA disabled.
+
+### Readiness, retries and household data
+
+- `GET /api/health` checks HTTP liveness. `GET /api/ready` reports worker progress, queue depth and age, per-device last success, event stream pressure, and free space for snapshots and household state. An unavailable optional device is reported separately. Full queues, stalled workers and low storage return HTTP 503.
+- Physical control and routine-run requests accept an `Idempotency-Key` of 1–128 ASCII letters, digits, dots, underscores or hyphens. Reuse one key for retries of the same request. A key reused with a changed payload returns 409. A 202 response includes a status URL to poll. Receipts stay in memory for ten minutes after completion, up to 1,024 keys per service instance. Restarting clears HTTP receipts.
+- The web dashboard can save and run up to 32 routines of 1–16 steps. Each routine can have a daily time in the server's local timezone. The scheduler claims a routine once per local date. A repeated clock hour runs once, and a skipped hour or a service outage skips the missed run. An interrupted scheduled run retains its claim, and its last step is marked unconfirmed. Inspect **Recent runs** for per-device results.
+- `COUKAB_STATE_DB` sets the SQLite path for routines, recent runs and action history. The default is `coukab.sqlite3` in the service working directory. The service retains the latest 1,000 action records and up to 24 hours of minute-level air readings. Expand **Air quality over 24 hours** for hourly averages. `GET /api/history` also returns the latest 100 action records with source, duration and outcome.
 
 ---
 
@@ -159,7 +171,7 @@ A live, high-performance dashboard featuring a modern minimal glassmorphic desig
 *   **Optimistic UI & Low Latency:** Buttons dim during requests, and purifier toggles transition optimistically for immediate visual feedback.
 *   **Mobile Viewport Optimization:** A floating bottom tab bar navigation dynamically partitions controls into *Home*, *Lights*, *Devices* (Vacuum + Purifier), *Camera*, and *Khatoon Chat* views to avoid scrolling fatigue.
 *   **Desktop Viewport Adaptation:** Displays a unified dashboard view with a sticky sidebar on the left and a responsive multi-column layout on the right.
-*   **Progressive Web App (PWA):** Includes PWA support (`manifest.webmanifest`, `icon.svg`, `sw.js`) with a service worker implementing stale-while-revalidate caching. "Add to Home Screen" launches the UI in full-screen.
+*   **Progressive Web App (PWA):** Includes PWA support (`manifest.webmanifest`, `icon.svg`, `sw.js`) with a service worker that revalidates the dashboard on load and caches the shell for offline access. "Add to Home Screen" launches the UI in full-screen.
 *   **A11y & Localization:** Features a full English/Farsi localization toggle (FA/EN button, RTL layout alignment, translated labels and device states) persisted in `localStorage`, along with `aria-label` tags for screen readers.
 *   **Lights** — tap individual bulbs (I1–I6) to target a subset, scenes
     (cool/warm white, sunset, sleep, romantic, movie), brightness slider (live-throttled at $\ge$350ms to respect LAN rate limits), full RGB color picker, white-temperature slider, party mode + patterns, color cycle, random colors, targeted on/off, all-off, and undo.

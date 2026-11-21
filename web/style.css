@@ -610,3 +610,9 @@ select:focus { border-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+#routinesCard details, #airHistory { margin-block: .7rem; }
+#routineForm label { display: block; margin-block: .5rem; }
+#routineList .btn-row, #routineSteps li { margin-block: .4rem; }
+#airHistory table { width: 100%; font-variant-numeric: tabular-nums; text-align: start; }
+#airHistory th, #airHistory td { text-align: start; padding-block: .2rem; }

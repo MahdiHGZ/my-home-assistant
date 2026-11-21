@@ -9,22 +9,28 @@ Design notes:
   color-cycle index) are routed through ``Controller.run_action`` so they are
   serialized with keypad presses. Vacuum, purifier and camera calls are
   independent devices and run directly on the request thread.
-- There is no authentication by design — bind only to a trusted LAN.
+- The default trusted-LAN mode supports optional HTTP Basic authentication.
 """
 
 from __future__ import annotations
 
-from functools import wraps
+from functools import lru_cache, partial, wraps
 
+import base64
+import binascii
+import gzip
+import hashlib
 import hmac
 import json
 import logging
 import os
 import queue
+import shutil
 import socket
 import threading
 import time
 import uuid
+from datetime import datetime
 from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
@@ -33,6 +39,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from action_errors import ActionCancelledError, ActionInProgressError, ActionQueueFullError
+from household import Household
+from worker import Worker
+from receipts import ReceiptError, Receipts, accepted
+from device_actions import ACTIONS, describe
 import tapo_camera_utils as tapo
 import tuch_controller_utils as panel
 import xiaomi_airpurifier_utils as purifier
@@ -103,6 +113,16 @@ class _RemoteDrive:
                     vacuum.remote_control(10)
                 finally:
                     notify_status_changed()
+
+    def stop_on_shutdown(self):
+        with _vacuum_action_lock:
+            active = self.timer is not None or self.owner is not None
+            self.revoke()
+            if active:
+                try:
+                    vacuum.remote_control(5)
+                finally:
+                    vacuum.remote_control(10)
 
     def arm_timeout(self):
         if self.timer:
@@ -182,8 +202,10 @@ class _EventMailbox:
 
     def put(self, event, payload):
         with self._ready:
+            replaced = event in self._events
             self._events[event] = payload
             self._ready.notify()
+            return replaced
 
     def get(self, timeout):
         with self._ready:
@@ -195,6 +217,9 @@ class _EventMailbox:
 
 _sse_clients: set[_EventMailbox] = set()
 _sse_lock = threading.Lock()
+_sse_coalesced = 0
+_sse_rejected = 0
+_device_success = {}
 _status_dirty = threading.Event()
 _controller_ref = None  # set by start()
 
@@ -216,13 +241,16 @@ def notify_status_changed() -> None:
 def _sse_broadcast(event: str, payload: str) -> None:
     """Queues one named SSE event for every connected client."""
     with _sse_lock:
+        global _sse_coalesced
         for client in _sse_clients:
-            client.put(event, payload)
+            _sse_coalesced += bool(client.put(event, payload))
 
 
-def _notifier_loop() -> None:
-    while True:
+def _notifier_loop(stopped=None) -> None:
+    while stopped is None or not stopped.is_set():
         _status_dirty.wait()
+        if stopped is not None and stopped.is_set():
+            return
         time.sleep(_SSE_DEBOUNCE_S)  # coalesce action bursts into one snapshot
         _status_dirty.clear()
         if _controller_ref is None:
@@ -550,6 +578,9 @@ def _build_status(controller) -> dict:
         result["moments"] = _moments_summary()
         generated_at = time.monotonic()
         with _last_status_lock:
+            for key in futures:
+                if result[key].get("available") and result[key].get("ok") is not False:
+                    _device_success[key] = time.time()
             _last_status = result
             _last_status_time = generated_at
             _status_invalidated = superseded or generation != _status_generation
@@ -653,6 +684,36 @@ def _panel_alert_rgb565(w: int, h: int) -> bytes:
     return data
 
 
+def _readiness(controller):
+    workers = controller.diagnostics()
+    with _last_status_lock:
+        devices = {key: {"last_success": _device_success.get(key),
+                         "available": (_last_status or {}).get(key, {}).get("available", False)
+                         and (_last_status or {}).get(key, {}).get("ok") is not False}
+                   for key in ("lights", "vacuum", "purifier")}
+    with _sse_lock:
+        events = {"clients": len(_sse_clients), "coalesced": _sse_coalesced, "rejected": _sse_rejected}
+    locations = {"moments": Path(tapo.MOMENTS_DIR)}
+    if getattr(controller, "household", None):
+        locations["state"] = controller.household.path
+    storage = {}
+    for name, location in locations.items():
+        path = location if location.is_dir() else location.parent
+        try:
+            free = shutil.disk_usage(path).free
+            writable = os.access(path, os.W_OK | os.X_OK)
+            if name == "state":
+                writable = writable and location.is_file() and os.access(location, os.W_OK)
+            elif location.exists():
+                writable = writable and location.is_dir()
+            storage[name] = {"ok": writable and free >= 10 * 1024 * 1024, "free_bytes": free}
+        except OSError:
+            storage[name] = {"ok": False, "free_bytes": None}
+    ready = (all(s["ok"] for s in storage.values())
+             and all(w["healthy"] and w["queue_depth"] < w["capacity"] for w in workers.values()))
+    return {"ok": ready, "workers": workers, "devices": devices, "events": events, "storage": storage}
+
+
 def _enum_options(enum_cls) -> list[dict]:
     return [
         {"value": int(member.value), "name": member.name.replace("_", " ").title()}
@@ -670,6 +731,7 @@ def _capabilities() -> dict:
         "chat_ready": _chat_ready,
         "delete_protected": bool(_DELETE_PASSWORD),
         "bulbs": bulbs,
+        "actions": [{"device": a.device, "action": a.name, "fields": a.fields} for a in ACTIONS.values()],
         "color_cycle": list(yeelight.COLOR_CYCLE),
         "scene_modes": [
             {"key": k, "name": yeelight.MODES[k].name}
@@ -748,44 +810,16 @@ def _int_field(
 
 
 def _lights_action(controller, body: dict) -> dict:
-    action = _string_field(body, "action")
-    c = controller
-    if action not in {"mode", "party_pattern"}:
-        _reject_unknown(body, {"action"})
-    if action == "mode":
-        _reject_unknown(body, {"action", "mode"})
-        key = _string_field(body, "mode")
-        if key not in yeelight.MODES:
-            raise _ApiError(f"Unknown mode '{key}'.")
-        c.run_action(c._do_apply_mode, yeelight.MODES[key])
-    elif action == "full_bright":
-        c.run_action(c._do_apply_mode, yeelight.MODES["max_bright"])
-    elif action == "party_toggle":
-        c.run_action(c._do_party_toggle)
-    elif action == "party_pattern":
-        _reject_unknown(body, {"action", "value"})
-        c.run_action(c._do_party_pattern, _int_field(body, "value", minimum=0))
-    elif action == "cycle_start":
-        c.run_action(c._do_color_cycle_start)
-    elif action == "cycle_next":
-        c.run_action(c._do_color_cycle_advance, 1)
-    elif action == "cycle_prev":
-        c.run_action(c._do_color_cycle_advance, -1)
-    elif action == "brightness_up":
-        c.run_action(c._do_brightness, _BRIGHTNESS_STEP)
-    elif action == "brightness_down":
-        c.run_action(c._do_brightness, -_BRIGHTNESS_STEP)
-    elif action == "all_off":
-        c.run_action(c._do_all_off)
-    elif action == "random_color":
-        c.run_action(c._do_random_color, each=False)
-    elif action == "random_each":
-        c.run_action(c._do_random_color, each=True)
-    elif action == "undo":
-        c.run_action(c._do_undo)
-    else:
-        raise _ApiError(f"Unknown light action '{action}'.")
-    return {"ok": True, "state": c.state()}
+    descriptor = _describe("lights", body)
+    controller.apply_light(descriptor, body)
+    return {"ok": True, "state": controller.state()}
+
+
+def _describe(device, body):
+    try:
+        return describe(device, body)
+    except ValueError as exc:
+        raise _ApiError(str(exc)) from exc
 
 
 def _lights_control(controller, body: dict) -> dict:
@@ -803,8 +837,7 @@ def _lights_control(controller, body: dict) -> dict:
     color = _string_field(body, "color", required=False)
     if power is None and brightness is None and color is None:
         raise _ApiError("Provide at least one of power, brightness, color.")
-    result = controller.run_action(
-        controller._do_control,
+    result = controller.control_lights(
         targets,
         power=power,
         brightness=brightness,
@@ -815,47 +848,18 @@ def _lights_control(controller, body: dict) -> dict:
 
 def _vacuum_action(body: dict) -> dict:
     action = _string_field(body, "action")
-    no_value_actions = {"sweep", "mop", "sweep_mop", "stop", "pause", "dock", "find_me"}
-    if action in no_value_actions:
-        _reject_unknown(body, {"action"})
-    elif action == "remote":
+    if action == "remote":
         _reject_unknown(body, {"action", "value", "session", "seq", "epoch"})
+        descriptor = None
     else:
-        _reject_unknown(body, {"action", "value"})
+        descriptor = _describe("vacuum", body)
     try:
         with _vacuum_action_lock:
-            if action in {"sweep", "mop", "sweep_mop", "stop", "pause", "dock"}:
-                _drive.revoke()
-            if action == "sweep":
-                vacuum.start_sweep()
-            elif action == "mop":
-                vacuum.start_mop()
-            elif action == "sweep_mop":
-                vacuum.start_sweep_mop()
-            elif action == "stop":
-                vacuum.stop()
-            elif action == "pause":
-                vacuum.pause()
-            elif action == "dock":
-                vacuum.return_dock()
-            elif action == "find_me":
-                vacuum.find_me()
-            elif action == "suction":
-                vacuum.set_suction_level(_int_field(body, "value", allowed={0, 1, 2, 3}))
-            elif action == "water":
-                vacuum.set_water_level(_int_field(body, "value", allowed={0, 1, 2}))
-            elif action == "volume":
-                vacuum.set_volume(_int_field(body, "value", minimum=0, maximum=10))
-            elif action == "room_sweep":
-                value = body.get("value")
-                if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).strip():
-                    raise _ApiError("'value' must be a room identifier.")
-                _drive.revoke()
-                vacuum.start_room_sweep(str(value))
-            elif action == "remote":
+            if descriptor is None:
                 return _drive.command(body)
-            else:
-                raise _ApiError(f"Unknown vacuum action '{action}'.")
+            if action in {"sweep", "mop", "sweep_mop", "stop", "pause", "dock", "room_sweep"}:
+                _drive.revoke()
+            getattr(vacuum, descriptor.handler)(*descriptor.parameters(body))
     except _ApiError:
         raise
     except Exception as e:
@@ -866,35 +870,9 @@ def _vacuum_action(body: dict) -> dict:
 
 
 def _purifier_action(body: dict) -> dict:
-    action = _string_field(body, "action")
-    if action == "toggle":
-        _reject_unknown(body, {"action"})
-    else:
-        _reject_unknown(body, {"action", "value"})
+    descriptor = _describe("purifier", body)
     try:
-        if action == "power":
-            value = _bool_field(body, "value")
-            purifier.turn_on() if value else purifier.turn_off()
-        elif action == "toggle":
-            purifier.toggle()
-        elif action == "mode":
-            purifier.set_mode(_int_field(body, "value", allowed={0, 1, 2, 3}))
-        elif action == "fan":
-            purifier.set_fan_level(_int_field(body, "value", allowed={1, 2, 3}))
-        elif action == "manual_level":
-            purifier.set_manual_level(_int_field(body, "value", minimum=1, maximum=3))
-        elif action == "favorite_speed":
-            purifier.set_favorite_speed(_int_field(body, "value", minimum=200, maximum=2300))
-        elif action == "anion":
-            purifier.set_anion(_bool_field(body, "value"))
-        elif action == "child_lock":
-            purifier.set_child_lock(_bool_field(body, "value"))
-        elif action == "buzzer":
-            purifier.set_buzzer(_bool_field(body, "value"))
-        elif action == "screen":
-            purifier.set_screen_brightness(_int_field(body, "value", allowed={0, 1, 2}))
-        else:
-            raise _ApiError(f"Unknown purifier action '{action}'.")
+        getattr(purifier, descriptor.handler)(*descriptor.parameters(body))
     except _ApiError:
         raise
     except Exception as e:
@@ -910,11 +888,7 @@ def _camera_capture(controller, body: dict) -> dict:
     if flash is None:
         flash = False
     try:
-        if flash:
-            captured = controller.run_action(controller._do_capture, flash=True, timeout=90)
-        else:
-            result = tapo.capture_moment_for_model(include_data_uri=False)
-            captured = result["image_path"]
+        captured = controller.capture(flash=flash)
     except (ActionCancelledError, ActionInProgressError, ActionQueueFullError):
         raise
     except Exception as e:
@@ -953,6 +927,35 @@ def _chat(body: dict) -> dict:
 
 
 # -- HTTP handler -------------------------------------------------------------
+
+@lru_cache(maxsize=32)
+def _asset(path: Path, fingerprint: tuple, compressed: bool):
+    data = path.read_bytes()
+    if compressed:
+        data = gzip.compress(data, compresslevel=6, mtime=0)
+    return data, '"' + hashlib.sha256(data).hexdigest() + '"'
+
+
+def _accepts_gzip(header):
+    preferences = {}
+    for item in header.lower().split(","):
+        encoding, *params = item.strip().split(";")
+        weight = 1.0
+        for param in params:
+            if param.strip().startswith("q="):
+                try:
+                    weight = float(param.strip()[2:])
+                except ValueError:
+                    weight = 0.0
+        preferences[encoding.strip()] = weight
+    return preferences.get("gzip", preferences.get("*", 0)) > 0
+
+
+def _credentials():
+    return {name: tuple(secret.encode() for suffix in ("", "_PREVIOUS")
+                        if (secret := os.getenv(f"COUKAB_{name.upper()}_PASSWORD{suffix}")))
+            for name in ("browser", "panel")}
+
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "Coukab/1.0"
@@ -1020,7 +1023,7 @@ class _Handler(BaseHTTPRequestHandler):
             return {}
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError as e:
+        except (ValueError, UnicodeError, RecursionError) as e:
             raise _ApiError(f"Invalid JSON body: {e}") from e
         if not isinstance(data, dict):
             raise _ApiError("Request body must be a JSON object.")
@@ -1032,16 +1035,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Not found."}, status=404)
             return
         content_type = _STATIC_TYPES.get(path.suffix.lower(), "application/octet-stream")
-        data = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        # The service worker must revalidate every load so UI updates roll
-        # out promptly; other assets may be briefly cached.
-        if name == "sw.js":
-            self.send_header("Cache-Control", "no-cache")
+        stat = path.stat()
+        compressible = path.suffix in {".html", ".css", ".js", ".svg", ".json", ".webmanifest"}
+        compressed = compressible and _accepts_gzip(self.headers.get("Accept-Encoding", ""))
+        data, etag = _asset(path, (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns), compressed)
+        tags = [tag.strip().removeprefix("W/") for tag in self.headers.get("If-None-Match", "").split(",")]
+        current = etag in tags or "*" in tags
+        self.send_response(304 if current else 200)
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "private, no-cache")
+        if compressible:
+            self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
+        if not current:
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if not current:
+            self.wfile.write(data)
 
     def _send_rgb565(self, data: bytes) -> None:
         self.send_response(200)
@@ -1122,6 +1134,9 @@ class _Handler(BaseHTTPRequestHandler):
                 latest = panel.get_alert()
                 if latest.get("id"):
                     client.put("alert", json.dumps({"id": latest["id"]}))
+            else:
+                global _sse_rejected
+                _sse_rejected += 1
         if not admitted:
             self.close_connection = True
             self._send_json({"ok": False, "error": "Event streams are busy."}, status=503)
@@ -1138,7 +1153,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: status\ndata: {payload}\n\n".encode("utf-8"))
             self.wfile.flush()
 
-            while True:
+            while not self.server.stopped.is_set():
                 try:
                     event, payload = client.get(timeout=_SSE_HEARTBEAT_S)
                     self.wfile.write(f"event: {event}\ndata: {payload}\n\n".encode("utf-8"))
@@ -1160,14 +1175,51 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         # Timestamped file names are immutable, so allow caching.
-        self.send_header("Cache-Control", "max-age=86400")
+        self.send_header("Cache-Control", "private, no-store" if any(self.server.credentials.values()) else "private, max-age=86400")
         if download:
             self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
         self.end_headers()
         self.wfile.write(data)
 
+    def _authorize(self):
+        if self.server.stopped.is_set():
+            self.close_connection = True
+            self._send_json({"error": "Service is stopping."}, status=503)
+            return False
+        origin = self.headers.get("Origin")
+        if self.command == "POST" and origin:
+            allowed = {value.strip() for value in os.getenv("COUKAB_ALLOWED_ORIGINS", "").split(",") if value.strip()}
+            if not allowed:
+                allowed = {f"http://{self.headers.get('Host', '')}"}
+            if origin not in allowed:
+                self.close_connection = True
+                self._send_json({"error": "Origin is not allowed."}, status=403)
+                return False
+        credentials = self.server.credentials
+        if not any(credentials.values()):
+            return True
+        scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() == "basic":
+            try:
+                user, _, password = base64.b64decode(token, validate=True).partition(b":")
+                if any(hmac.compare_digest(password, secret)
+                       for secret in credentials.get(user.decode("ascii"), ())):
+                    return True
+            except (ValueError, UnicodeError, binascii.Error):
+                pass
+        self.close_connection = True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Coukab", charset="UTF-8"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        return False
+
     # -- routing --
     def do_GET(self) -> None:  # noqa: N802 - base API
+        if not self._authorize():
+            return
         path = self.path.split("?", 1)[0]
         try:
             if path == "/":
@@ -1180,6 +1232,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(_capabilities())
             elif path == "/api/health":
                 self._send_json({"ok": True, "status": "running"})
+            elif path == "/api/history":
+                self._send_json(self.server.household.history())
+            elif path == "/api/routines":
+                self._send_json({"routines": self.server.household.routines(), "runs": self.server.household.recent_runs()})
+            elif path == "/api/ready":
+                report = _readiness(self._controller)
+                self._send_json(report, status=200 if report["ok"] else 503)
             elif path == "/api/status":
                 self._send_json(_cached_status(self._controller))
             elif path == "/api/status/cached":
@@ -1204,7 +1263,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(_moments_summary())
             elif path.startswith("/api/actions/"):
                 job_id = path.removeprefix("/api/actions/")
-                state = self._controller.job_state(job_id)
+                state = self.server.receipts.state(job_id) or self._controller.job_state(job_id)
                 if state is None:
                     raise _ApiError("No such action.", status=404)
                 self._send_json({"ok": True, "job": state})
@@ -1233,44 +1292,111 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(payload, status=exc.status)
 
     def do_POST(self) -> None:  # noqa: N802 - base API
+        if not self._authorize():
+            return
         path = self.path.split("?", 1)[0]
         try:
             body = self._read_body()
-            if path == "/api/lights/action":
-                self._send_json(_lights_action(self._controller, body))
-            elif path == "/api/lights/control":
-                self._send_json(_lights_control(self._controller, body))
-            elif path == "/api/vacuum/action":
-                self._send_json(_vacuum_action(body))
-            elif path == "/api/purifier/action":
-                self._send_json(_purifier_action(body))
-            elif path == "/api/camera/capture":
-                self._send_json(_camera_capture(self._controller, body))
-            elif path == "/api/camera/delete":
-                self._send_json(_camera_delete(body))
-            elif path == "/api/panel/alert":
-                self._send_json(_panel_alert_send(body))
-            elif path == "/api/chat":
-                self._send_json(_chat(body))
-            elif path == "/api/chat/stream":
+            if path == "/api/chat/stream":
                 self._serve_chat_stream(body)
-            else:
-                self._send_json({"error": "Not found."}, status=404)
+                return
+            receipt = None
+            key = self.headers.get("Idempotency-Key")
+            if key is not None and path in _RETRIABLE:
+                fingerprint = hashlib.sha256(json.dumps([path, body], sort_keys=True).encode()).digest()
+                receipt, previous = self.server.receipts.reserve(key, fingerprint)
+                if previous is not None:
+                    status, payload = previous
+                    self._send_json(payload, status=status)
+                    return
+            started = time.monotonic()
+            status, payload = self._mutation_response(path, body)
+            controller_job = payload.get("job_id") if status == 202 else None
+            if receipt is not None:
+                if controller_job:
+                    status, payload = self.server.receipts.follow(receipt, self._controller, controller_job)
+                else:
+                    self.server.receipts.finish(receipt, (status, payload))
+            if self.server.household and path in _RETRIABLE:
+                label = path.removeprefix("/api/")
+                device = label.split("/")[0]
+                action = body.get("action")
+                if isinstance(action, str) and (device, action) in ACTIONS:
+                    label = f"{device}/{action}"
+                outcome = "accepted" if status == 202 else "done" if status < 400 and payload.get("ok") and payload.get("complete", True) else "failed"
+                store = self.server.household
+                store.record_safely("http", label, outcome, time.monotonic() - started)
+                if controller_job:
+                    def finished(job):
+                        store.record_safely("http", label, job["status"], time.monotonic() - started)
+                    self._controller.on_job_finished(controller_job, finished)
+        except ReceiptError as exc:
+            status, payload = exc.status, {"ok": False, "error": str(exc)}
         except _ApiError as exc:
             self._send_api_error(exc)
+            return
+        except Exception:
+            status, payload = 500, self._public_failure("Internal server error.")
+        self._send_json(payload, status=status)
+
+    def _mutation_response(self, path, body):
+        if self.server.stopped.is_set():
+            return 503, {"ok": False, "error": "Service is stopping."}
+        try:
+            if path in {"/api/routines/save", "/api/routines/delete", "/api/routines/run"}:
+                try:
+                    if path.endswith("/save"):
+                        _reject_unknown(body, {"name", "steps", "schedule"})
+                        self.server.household.save(body)
+                        return 200, {"ok": True}
+                    _reject_unknown(body, {"name"})
+                    name = _string_field(body, "name")
+                    if path.endswith("/delete"):
+                        self.server.household.delete(name)
+                        return 200, {"ok": True}
+                    result = self._controller.run_action(self.server.run_routine, name, lane=self.server.routine_worker,
+                                                         retry=False, publish_result=True, timeout=2)
+                    return 200, result
+                except ValueError as exc:
+                    raise _ApiError(str(exc)) from exc
+            if path == "/api/lights/action":
+                result = _lights_action(self._controller, body)
+            elif path == "/api/lights/control":
+                result = _lights_control(self._controller, body)
+            elif path == "/api/vacuum/action":
+                result = _vacuum_action(body)
+            elif path == "/api/purifier/action":
+                result = _purifier_action(body)
+            elif path == "/api/camera/capture":
+                result = _camera_capture(self._controller, body)
+            elif path == "/api/camera/delete":
+                result = _camera_delete(body)
+            elif path == "/api/panel/alert":
+                result = _panel_alert_send(body)
+            elif path == "/api/chat":
+                result = _chat(body)
+            else:
+                return 404, {"error": "Not found."}
+            return 200, result
+        except _ApiError as exc:
+            return exc.status, (self._public_failure("Upstream service failed.") if exc.status >= 500
+                                else {"ok": False, "error": str(exc)})
         except ActionQueueFullError:
-            self._send_json({"ok": False, "error": "Too many pending actions."}, status=429)
+            return 429, {"ok": False, "error": "Too many pending actions."}
         except ActionInProgressError as exc:
-            self._send_json({"ok": True, "accepted": True, "job_id": exc.job_id,
-                             "status_url": f"/api/actions/{exc.job_id}"}, status=202)
+            return accepted(exc.job_id)
         except TimeoutError:
-            self._send_json(self._public_failure("Action timed out."), status=504)
+            return 504, self._public_failure("Action timed out.")
         except yeelight.BulbBatchError as exc:
             payload = self._public_failure("One or more bulbs failed.")
             payload["failed_bulbs"] = sorted(exc.failures)
-            self._send_json(payload, status=502)
+            return 502, payload
         except Exception:
-            self._send_json(self._public_failure("Internal server error."), status=500)
+            return 500, self._public_failure("Internal server error.")
+
+
+_RETRIABLE = {"/api/lights/action", "/api/lights/control", "/api/purifier/action",
+              "/api/vacuum/action", "/api/camera/capture", "/api/camera/delete", "/api/routines/run"}
 
 
 class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -1279,8 +1405,86 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
     request_queue_size = _MAX_HANDLER_THREADS
 
     def __init__(self, *args, **kwargs):
+        self.household = None
+        self.scheduler = None
+        self.sampler = None
+        self.receipts = Receipts()
+        self.stopped = threading.Event()
+        self.notifier = None
+        self.credentials = _credentials()
         self._handler_slots = threading.BoundedSemaphore(_MAX_HANDLER_THREADS)
         super().__init__(*args, **kwargs)
+        self.routine_worker = Worker("household-routines", 32)
+
+    def run_routine(self, name, local_time=None):
+        def execute(step):
+            if self.stopped.is_set():
+                raise RuntimeError("Controller stopping")
+            device = step["device"]
+            body = {k: v for k, v in step.items() if k != "device"}
+            started = time.monotonic()
+            outcome = "failed"
+            try:
+                if device == "lights":
+                    try:
+                        _lights_action(self.controller, body)
+                    except ActionInProgressError as exc:
+                        while not self.stopped.wait(0.25):
+                            job = self.controller.job_state(exc.job_id)
+                            if not job or job["status"] in {"cancelled", "failed"}:
+                                raise RuntimeError("Light action failed")
+                            if job["status"] == "done":
+                                break
+                        else:
+                            raise RuntimeError("Controller stopping")
+                elif device == "purifier":
+                    _purifier_action(body)
+                elif device == "vacuum":
+                    _vacuum_action(body)
+                outcome = "done"
+            finally:
+                self.household.record_safely("schedule" if local_time else "routine",
+                                             f"{device}/{body['action']}", outcome, time.monotonic() - started)
+        return self.household.run(name, execute, local_time=local_time)
+
+    def schedule_loop(self):
+        previous = None
+        while not self.stopped.is_set():
+            now = datetime.now().astimezone()
+            minute = int(now.timestamp() // 60)
+            try:
+                if minute != previous:
+                    for routine in self.household.routines():
+                        if routine["schedule"] == now.strftime("%H:%M"):
+                            self.routine_worker.submit(partial(self.run_routine, routine["name"], now))
+                    previous = minute
+            except Exception:
+                logger.exception("Could not queue scheduled routines")
+            self.stopped.wait(1)
+
+    def sample_loop(self):
+        while not self.stopped.is_set():
+            try:
+                snapshot = _cached_status(self.controller)
+                self.household.sample(snapshot.get("purifier", {}), time.time())
+            except Exception:
+                logger.exception("Could not record environmental sample")
+            self.stopped.wait(60)
+
+    def shutdown(self):
+        self.stopped.set()
+        _status_dirty.set()
+        self.routine_worker.stop()
+        super().shutdown()
+        if self.notifier:
+            drive_stop = threading.Thread(target=_drive.stop_on_shutdown, name="drive-stop", daemon=True)
+            drive_stop.start()
+            # Wake existing streams so their handlers can release their sockets.
+            _sse_broadcast("close", "{}")
+            self.controller.on_action = None
+            panel.set_broadcaster(None)
+            for thread in (self.notifier, self.scheduler, self.sampler, self.routine_worker.thread, drive_stop):
+                thread.join(timeout=0.25)
 
     def process_request(self, request, client_address) -> None:
         if not self._handler_slots.acquire(blocking=False):
@@ -1325,16 +1529,24 @@ def start(controller, host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPS
     httpd.controller = controller  # type: ignore[attr-defined]
     httpd.daemon_threads = True
 
+    httpd.household = getattr(controller, "household", None) or Household(os.getenv("COUKAB_STATE_DB", "coukab.sqlite3"))
+    httpd.household.recover()
+    httpd.scheduler = threading.Thread(target=httpd.schedule_loop, name="scheduler", daemon=True)
+    httpd.sampler = threading.Thread(target=httpd.sample_loop, name="environment-sampler", daemon=True)
+    httpd.scheduler.start()
+    httpd.sampler.start()
+
     # Live updates: every completed controller job (keypad or web) triggers a
     # debounced status push to all SSE subscribers.
     _controller_ref = controller
     controller.on_action = notify_status_changed
     panel.set_broadcaster(_sse_broadcast)  # let the panel module push alerts
-    threading.Thread(target=_notifier_loop, name="sse-notifier", daemon=True).start()
+    httpd.notifier = threading.Thread(target=_notifier_loop, args=(httpd.stopped,), name="sse-notifier", daemon=True)
+    httpd.notifier.start()
 
     threading.Thread(target=httpd.serve_forever, name="web-server", daemon=True).start()
     logger.info(
-        "Web interface: http://%s:%d  (open http://%s:%d on your phone) — no login.",
+        "Web interface: http://%s:%d  (open http://%s:%d on your phone).",
         host, port, lan_ip(), port,
     )
     return httpd

@@ -26,7 +26,7 @@ Combo keys (hold KP0 as modifier):
   KP0 + BACKSPACE:   Undo — restore previous bulb state.
 
 Web interface:
-  Running main.py also starts a no-login LAN web UI (default http://0.0.0.0:8080)
+  Running main.py also starts a LAN web UI (default http://0.0.0.0:8080)
   so the same devices can be controlled from a phone or laptop — useful when the
   keypad is unavailable. The web UI adds richer controls than the keypad (per-bulb
   color, sliders, full vacuum/purifier controls, camera, optional LLM chat).
@@ -42,15 +42,19 @@ Usage:
 
 from __future__ import annotations
 
+from device_actions import LightActions
+from household import Household
 import argparse
 import functools
 import logging
-import queue
+import os
+import signal
+import socket
 import sys
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from worker import Worker
 from pathlib import Path
 from typing import Callable
 
@@ -98,17 +102,24 @@ _COMBO_KEY_MODES: dict[str, yeelight_bulb_utils.BulbMode] = {
 }
 
 
+_SINGLE_KEYS = set(_SINGLE_KEY_MODES) | {"KEY_KP1", "KEY_KP4", "KEY_KP5", "KEY_KPPLUS", "KEY_KPMINUS"}
+_COMBO_KEYS = set(_COMBO_KEY_MODES) | {"KEY_KP1", "KEY_KP2", "KEY_KP3", "KEY_KP4", "KEY_KP6",
+                                     "KEY_KPMINUS", "KEY_KPASTERISK", "KEY_KPSLASH", "KEY_BACKSPACE"}
+
+
 # ---------------------------------------------------------------------------
 # Camera capture helpers
 # ---------------------------------------------------------------------------
 
-def _capture(bulbs: dict[str, str], *, flash: bool) -> Path:
+def _capture(bulbs: dict[str, str], *, flash: bool, cap=None, countdown=False) -> Path:
     """Captures a photo, optionally flashing full brightness first.
 
     The camera is connected before any lighting changes, so a slow or
     failed RTSP connect never leaves the room stuck in flash lighting.
     """
-    cap = tapo_camera_utils.connect()
+    own_connection = cap is None
+    if own_connection:
+        cap = tapo_camera_utils.connect()
     if cap is None:
         raise tapo_camera_utils.TapoError("Camera connection failed.")
 
@@ -116,13 +127,16 @@ def _capture(bulbs: dict[str, str], *, flash: bool) -> Path:
     try:
         if flash:
             snapshot = yeelight_bulb_utils.read_state(bulbs)
+            if countdown:
+                yeelight_bulb_utils.run_row_pair_sweep_count(bulbs)
             _prepare_flash_lighting(bulbs)
         image_path = tapo_camera_utils.capture_moment(cap)
         if image_path is None:
             raise tapo_camera_utils.TapoError("Failed to capture image frame.")
         return image_path
     finally:
-        cap.release()
+        if own_connection:
+            cap.release()
         if snapshot is not None:
             yeelight_bulb_utils.apply_state(bulbs, snapshot)
 
@@ -137,33 +151,10 @@ def _prepare_flash_lighting(bulbs: dict[str, str]) -> None:
     time.sleep(_CAPTURE_SETTLE_S)
 
 
-def _countdown_capture_with_flash(bulbs: dict[str, str]) -> None:
-    """Runs countdown and camera connect in parallel, then captures with flash."""
-    snapshot = yeelight_bulb_utils.read_state(bulbs)
-    cap = None
-    try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            countdown_future = pool.submit(yeelight_bulb_utils.run_row_pair_sweep_count, bulbs)
-            cap = tapo_camera_utils.connect()
-            countdown_future.result()
-
-        if cap is None:
-            logger.error("Camera connection failed.")
-            return
-
-        _prepare_flash_lighting(bulbs)
-        tapo_camera_utils.capture_moment(cap)
-    finally:
-        if cap is not None:
-            cap.release()
-        yeelight_bulb_utils.apply_state(bulbs, snapshot)
-
-
 def retry_with_discovery(max_attempts=3):
     """Retries bulb actions after rediscovering bulb IPs.
 
-    After the final attempt the error is logged, not raised — a failed key
-    action must never take down the event loop.
+    The worker records and logs failures without stopping the keypad event loop.
     """
     def decorator(fn):
         @functools.wraps(fn)
@@ -178,10 +169,9 @@ def retry_with_discovery(max_attempts=3):
                         "%s failed (attempt %d/%d).", fn.__name__, attempt, max_attempts
                     )
                     if attempt == max_attempts:
-                        break
+                        raise
                     yeelight_bulb_utils.update_discover_config()
                     time.sleep(1)
-            logger.error("Giving up on %s after %d attempts.", fn.__name__, max_attempts)
         return wrapper
     return decorator
 
@@ -190,57 +180,78 @@ def retry_with_discovery(max_attempts=3):
 # Key handling
 # ---------------------------------------------------------------------------
 
-class Controller:
+class Controller(LightActions):
     """Serialized action dispatcher shared by the keypad and the web UI.
 
-    Jobs run on a single worker thread so a slow device operation
-    (vacuum connect, RTSP, rediscovery) never blocks the evdev read loop,
-    and so light actions — which share the party-dance thread and the
-    color-cycle index — never race each other regardless of source.
+    Lighting changes share one worker. A second bounded worker prepares
+    camera streams and submits flash, exposure and restoration as one
+    lighting job. Both workers keep device I/O off the evdev read loop.
 
     The ``_do_*`` methods hold the actual device logic and are reused by
     both the keypad handlers and :meth:`run_action` (the web entry point).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, household=None) -> None:
+        self.household = household
         self._color_cycle_index = 0
         # Last applied scene mode name (e.g. "movie"); None after all-off.
         # Surfaced via state() so remote panels can highlight the active mode.
         self._last_mode: str | None = None
-        self._queue: queue.Queue[Callable[[], None]] = queue.Queue(maxsize=_ACTION_QUEUE_SIZE)
+        self.lights_worker = Worker("key-worker", _ACTION_QUEUE_SIZE)
+        self.camera_worker = Worker("camera-worker", 2)
+        self._queue = self.lights_worker.queue
         self._jobs_lock = threading.Lock()
         self._jobs: dict[str, dict[str, object]] = {}
+        self._job_listeners = {}
         # Called after every completed job (keypad or web). The web server
         # hooks this to push live status updates to connected browsers.
         self.on_action: Callable[[], None] | None = None
-        threading.Thread(
-            target=self._work_loop, name="key-worker", daemon=True
-        ).start()
+
 
     # -- queue plumbing -----------------------------------------------------
 
     def dispatch(self, keycode: str, *, combo: bool) -> None:
         """Queues a keypad action; returns immediately."""
+        if not isinstance(keycode, str) or keycode not in (_COMBO_KEYS if combo else _SINGLE_KEYS):
+            return
         handler = self._handle_combo_key if combo else self._handle_single_key
-        try:
-            self._queue.put_nowait(functools.partial(handler, keycode))
-        except queue.Full:
-            logger.warning("Controller queue full; dropping keypad action %s.", keycode)
+        lane = self.lights_worker
+        if combo and keycode in {"KEY_KP1", "KEY_KP2", "KEY_KP3"}:
+            lane = self.camera_worker
+            fn = functools.partial(self._prepare_capture, flash=keycode != "KEY_KP1", countdown=keycode == "KEY_KP3")
+        else:
+            fn = functools.partial(handler, keycode)
 
-    def _work_loop(self) -> None:
-        while True:
-            job = self._queue.get()
+        def run():
+            started = time.monotonic()
+            outcome = "failed"
             try:
-                job()
-            except Exception:
-                logger.exception("Unhandled error in queued action.")
-            callback = self.on_action
-            if callback is not None:
-                try:
-                    callback()
-                except Exception:
-                    logger.exception("on_action callback failed.")
-            self._queue.task_done()
+                fn()
+                outcome = "done"
+            finally:
+                if self.household:
+                    label = ("combo:" if combo else "") + keycode
+                    self.household.record_safely("keypad", label, outcome, time.monotonic() - started)
+                if self.on_action:
+                    self.on_action()
+        try:
+            lane.submit(run)
+        except ActionQueueFullError:
+            logger.warning("Controller busy; dropping keypad action %s.", keycode)
+
+    def diagnostics(self):
+        return {"actions": self.lights_worker.diagnostics(), "camera": self.camera_worker.diagnostics()}
+
+    def stop_accepting(self):
+        for lane in (self.camera_worker, self.lights_worker):
+            lane.stop()
+
+    def shutdown(self, timeout=5):
+        deadline = time.monotonic() + timeout
+        self.stop_accepting()
+        for lane in (self.camera_worker, self.lights_worker):
+            lane.thread.join(max(0, deadline - time.monotonic()))
+        yeelight_bulb_utils.stop_party_dance()
 
     QueueFullError = ActionQueueFullError  # compatibility for existing callers
 
@@ -255,7 +266,25 @@ class Controller:
                             self._jobs.pop(old_id, None)
                             break
                 self._jobs[job_id] = {"id": job_id}
-            self._jobs[job_id].update(fields)
+            state = self._jobs[job_id]
+            state.update(fields)
+            listeners = self._job_listeners.pop(job_id, []) if state.get("status") in {"done", "failed", "cancelled"} else []
+            snapshot = dict(state)
+        for callback in listeners:
+            try:
+                callback(snapshot)
+            except Exception:
+                logger.exception("Job completion listener failed")
+
+    def on_job_finished(self, job_id, callback):
+        """Attach atomically even when the worker has just completed."""
+        with self._jobs_lock:
+            state = self._jobs.get(job_id)
+            if state and state["status"] in {"queued", "running"}:
+                self._job_listeners.setdefault(job_id, []).append(callback)
+                return
+            snapshot = dict(state) if state else {"status": "failed", "error": "Action receipt expired."}
+        callback(snapshot)
 
     def job_state(self, job_id: str) -> dict[str, object] | None:
         """Return a copy of an asynchronous action's observable state."""
@@ -263,7 +292,8 @@ class Controller:
             state = self._jobs.get(job_id)
             return dict(state) if state is not None else None
 
-    def run_action(self, fn: Callable[..., object], *args, timeout: float = 60.0, **kwargs):
+    def run_action(self, fn: Callable[..., object], *args, timeout: float | None = 60.0,
+                   lane=None, retry=True, publish_result=False, **kwargs):
         """Runs an action on the worker thread and waits for its result.
 
         Used by the web interface so its actions are serialized with keypad
@@ -292,7 +322,8 @@ class Controller:
                 phase = "running"
             self._record_job(job_id, status="running", started_at=time.time())
             try:
-                box["result"] = self._with_discovery_retry(fn, *args, **kwargs)
+                box["result"] = (self._with_discovery_retry(fn, *args, **kwargs) if retry
+                                 else fn(*args, **kwargs))
             except BaseException as e:  # noqa: BLE001 — relayed to the HTTP caller
                 box["error"] = e
             finally:
@@ -302,12 +333,26 @@ class Controller:
                 if "error" in box:
                     logger.error("Action %s failed: %s", job_id, box["error"])
                     update["error"] = "Device action failed."
+                if phase == "done" and publish_result:
+                    update["result"] = box["result"]
+                if phase == "done" and isinstance(box.get("result"), Path):
+                    update["result"] = {"ok": True, "image": f"/moments/{box['result'].name}"}
                 self._record_job(job_id, **update)
+                done.set()
+                if self.on_action:
+                    self.on_action()
+
+        def cancel():
+            nonlocal phase
+            with state_lock:
+                phase = "cancelled"
+                box["error"] = ActionCancelledError(job_id)
+                self._record_job(job_id, status=phase, error="Controller stopped.", finished_at=time.time())
                 done.set()
 
         try:
-            self._queue.put_nowait(job)
-        except queue.Full as e:
+            (lane or self.lights_worker).submit(job, cancel)
+        except ActionQueueFullError as e:
             self._record_job(job_id, status="cancelled", error="queue full", finished_at=time.time())
             raise ActionQueueFullError("Too many pending actions in the queue.") from e
         if not done.wait(timeout):
@@ -481,19 +526,34 @@ class Controller:
             raise yeelight_bulb_utils.BulbBatchError(failures, result=result)
         return result
 
-    def _do_capture(self, *, flash: bool) -> Path:
-        bulbs = yeelight_bulb_utils.load_registered_bulbs()
-        if yeelight_bulb_utils.is_party_running():
-            yeelight_bulb_utils.stop_party_dance()
-        logger.info("Capture (flash=%s).", flash)
-        return _capture(bulbs, flash=flash)
+    def capture(self, *, flash: bool):
+        if flash:
+            return self.run_action(self._prepare_capture, flash=True, lane=self.camera_worker,
+                                   retry=False, timeout=90)
+        return self.run_action(self._plain_capture, lane=self.camera_worker, retry=False, timeout=90)
 
-    def _do_countdown_capture(self) -> None:
+    @staticmethod
+    def _plain_capture():
+        captured = tapo_camera_utils.capture_moment_for_model(include_data_uri=False)
+        return Path(captured["image_path"])
+
+    def _prepare_capture(self, *, flash: bool, countdown=False):
+        cap = tapo_camera_utils.connect()
+        if cap is None:
+            raise tapo_camera_utils.TapoError("Camera connection failed.")
+        try:
+            # The camera lane retains ownership until the exposure job has
+            # completed or been cancelled, including during service shutdown.
+            return self.run_action(self._expose, cap, flash=flash, countdown=countdown,
+                                   retry=False, timeout=None)
+        finally:
+            cap.release()
+
+    def _expose(self, cap, *, flash, countdown):
         bulbs = yeelight_bulb_utils.load_registered_bulbs()
         if yeelight_bulb_utils.is_party_running():
             yeelight_bulb_utils.stop_party_dance()
-        logger.info("Countdown then capture with flash.")
-        _countdown_capture_with_flash(bulbs)
+        return _capture(bulbs, flash=flash, cap=cap, countdown=countdown)
 
     def _do_vacuum_toggle(self) -> None:
         """Keypad KP1: start a full-speed sweep, or stop and dock if cleaning."""
@@ -517,6 +577,7 @@ class Controller:
         except Exception as e:
             xiaomi_vacuum_utils.reset_device()
             logger.error("Vacuum command failed: %s", e)
+            raise
 
     # -- keypad dispatch ----------------------------------------------------
 
@@ -558,12 +619,6 @@ class Controller:
             self._do_apply_mode(_COMBO_KEY_MODES[keycode])
         elif keycode == "KEY_KPMINUS":
             self._do_all_off()
-        elif keycode == "KEY_KP1":
-            self._do_capture(flash=False)
-        elif keycode == "KEY_KP2":
-            self._do_capture(flash=True)
-        elif keycode == "KEY_KP3":
-            self._do_countdown_capture()
         elif keycode == "KEY_KPASTERISK":
             self._do_random_color(each=False)
         elif keycode == "KEY_KPSLASH":
@@ -673,8 +728,29 @@ def run_keyboard(
                 device.ungrab()
             except OSError:
                 pass
+        device.close()
         logger.info("Stopped.")
     return True
+
+
+def _systemd_notify(message):
+    address = os.getenv("NOTIFY_SOCKET")
+    if address:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(1)
+            sock.sendto(message.encode(), address.replace("@", "\0", 1) if address.startswith("@") else address)
+
+
+def _watchdog(controller, stopped):
+    period = int(os.getenv("WATCHDOG_USEC", "0")) / 1_000_000
+    if period > 0:
+        while not stopped.wait(period / 3):
+            if all(lane["healthy"] for lane in controller.diagnostics().values()):
+                _systemd_notify("WATCHDOG=1")
+
+
+def _terminate(signum, frame):
+    raise KeyboardInterrupt
 
 
 def main() -> None:
@@ -685,7 +761,12 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    controller = Controller()
+    signal.signal(signal.SIGTERM, _terminate)
+    # A third-party device call can outlive Python executor shutdown. Bound
+    # process exit even when a device never releases an in-flight socket.
+    signal.signal(signal.SIGALRM, lambda *_: os._exit(1))
+    controller = Controller(Household(os.getenv("COUKAB_STATE_DB", "coukab.sqlite3")))
+    stopped = threading.Event()
 
     web = None
     if not args.no_web:
@@ -696,6 +777,8 @@ def main() -> None:
             logger.error("Could not start web interface on %s:%d — %s", args.web_host, args.web_port, e)
 
     try:
+        _systemd_notify("READY=1")
+        threading.Thread(target=_watchdog, args=(controller, stopped), daemon=True).start()
         ran = run_keyboard(args.device, controller, grab=args.grab, required=web is None)
         if not ran and web is not None:
             # Keypad unavailable but the web interface is up — stay alive for it.
@@ -704,9 +787,17 @@ def main() -> None:
                 threading.Event().wait()
             except KeyboardInterrupt:
                 logger.info("Interrupted.")
+    except KeyboardInterrupt:
+        pass
     finally:
+        signal.alarm(15)
+        stopped.set()
+        _systemd_notify("STOPPING=1")
+        controller.stop_accepting()
         if web is not None:
             web.shutdown()
+            web.server_close()
+        controller.shutdown()
 
 
 if __name__ == "__main__":

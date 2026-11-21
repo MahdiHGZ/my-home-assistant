@@ -96,3 +96,40 @@ test("the final brightness value follows the in-flight preview", async t => {
   await pending;
   assert.deepEqual(seen, [20, 60]);
 });
+
+test("a lost physical-action response retries with the same key and waits for the job", async t => {
+  const { window, run } = dashboard(t);
+  const calls = [];
+  const id = "a".repeat(32);
+  window.setTimeout = (callback, ms) => { if (ms === 1000) queueMicrotask(callback); return 1; };
+  window.fetch = async (path, opts) => {
+    calls.push([path, opts.headers["Idempotency-Key"]]);
+    if (calls.length === 1) throw Error("connection closed");
+    return calls.length === 2
+      ? {ok: true, status: 202, json: async () => ({accepted: true, job_id: id})}
+      : {ok: true, status: 200, json: async () => ({job: {status: "done", result: {ok: true, image: "/moments/example.jpg"}}})};
+  };
+  assert.equal((await run('api("POST", "/api/camera/capture", {flash:true})')).image, "/moments/example.jpg");
+  assert.match(calls[0][1], /^[a-f0-9]{32}$/);
+  assert.equal(calls[0][1], calls[1][1]);
+  assert.equal(calls[2][0], "/api/actions/" + id);
+});
+
+test("the routine editor saves typed steps from two devices and preserves their order", async t => {
+  const { window, run } = dashboard(t);
+  const requests = [];
+  window.fetch = async (path, opts) => {
+    requests.push([path, opts.body && JSON.parse(opts.body)]);
+    return {ok: true, status: 200, json: async () => path.endsWith("/save") ? {ok:true} : {routines:[], runs:[]}};
+  };
+  run('wireHousehold([{device:"lights",action:"all_off",fields:{}},{device:"purifier",action:"power",fields:{value:{type:"boolean"}}}]);');
+  const d = window.document, picker = d.querySelector("#routineAction");
+  d.querySelector("#routineName").value = "Bedtime";
+  d.querySelector("#routineAdd").click();
+  picker.value = "1"; picker.onchange();
+  d.querySelector("#routineParams select").value = "false";
+  d.querySelector("#routineAdd").click();
+  await d.querySelector("#routineForm").onsubmit({preventDefault() {}});
+  assert.deepEqual(requests.find(r => r[0].endsWith("/save"))[1], {name:"Bedtime", schedule:"",
+    steps:[{device:"lights",action:"all_off"},{device:"purifier",action:"power",value:false}]});
+});

@@ -6,6 +6,7 @@ of running them, and only the no-device error branches of the vacuum/purifier
 handlers are tested.
 """
 
+from device_actions import LightActions
 import io
 import tempfile
 import threading
@@ -23,7 +24,7 @@ import xiaomi_vacuum_utils as vacuum
 import yeelight_bulb_utils as yeelight
 
 
-class RecordingController:
+class RecordingController(LightActions):
     """Stand-in for main.Controller that records run_action dispatches."""
 
     def __init__(self):

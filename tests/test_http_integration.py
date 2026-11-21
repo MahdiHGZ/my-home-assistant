@@ -1,5 +1,6 @@
 """Real-socket integration tests for the bounded HTTP server."""
 
+from device_actions import LightActions
 import http.client
 import json
 import socket
@@ -13,7 +14,7 @@ from action_errors import ActionCancelledError, ActionInProgressError, ActionQue
 import web_server
 
 
-class _Controller:
+class _Controller(LightActions):
     def __init__(self):
         self.calls = []
 
@@ -23,6 +24,11 @@ class _Controller:
     def run_action(self, fn, *args, **kwargs):
         self.calls.append((fn.__name__, args, kwargs))
         return {"ok": True}
+
+    def capture(self, *, flash):
+        if not flash:
+            return web_server.tapo.capture_moment_for_model(include_data_uri=False)["image_path"]
+        return self.run_action(self._do_capture, flash=flash)
 
     def job_state(self, _job_id):
         return None

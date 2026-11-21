@@ -2,7 +2,7 @@
    API and camera images are always network-only. */
 "use strict";
 
-const VERSION = "coukab-v8";
+const VERSION = "coukab-v9";
 const SHELL = ["/", "/static/style.css", "/static/app.js", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -24,19 +24,16 @@ self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET" || url.origin !== location.origin) return;
   if (!SHELL.includes(url.pathname)) return; // /api/*, /moments/*: network only
 
-  // Stale-while-revalidate: serve from cache, refresh in the background.
-  e.respondWith(
-    caches.match(e.request).then((cached) => {
-      const fresh = fetch(e.request)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(VERSION).then((c) => c.put(e.request, copy));
-          }
-          return res;
-        })
-        .catch(() => cached);
-      return cached || fresh;
-    })
-  );
+  e.respondWith((async () => {
+    const cache = await caches.open(VERSION);
+    try {
+      const response = await fetch(e.request, { cache: "no-cache" });
+      if (response.ok) await cache.put(e.request, response.clone());
+      return response;
+    } catch (error) {
+      const cached = await cache.match(e.request);
+      if (cached) return cached;
+      throw error;
+    }
+  })());
 });

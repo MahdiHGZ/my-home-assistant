@@ -22,7 +22,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+WatchdogSec=60
+TimeoutStopSec=20
 WorkingDirectory=%h/coukab_lan
 ExecStart=%h/coukab_lan/venv/bin/python %h/coukab_lan/main.py
 Restart=on-failure
