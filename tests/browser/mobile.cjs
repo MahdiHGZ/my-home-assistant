@@ -25,8 +25,11 @@ async function verify() {
     await page.goto(url);
     await page.waitForFunction(()=>document.querySelector("#statVacuum .stat-line").textContent.includes("94"));
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),320);
-    await page.request.post(url+"/api/vacuum/action",{data:{action:"sweep"}});
-    await page.locator("#overviewPause").press("Enter");
+    const started = await page.request.post(url+"/api/vacuum/action",{data:{action:"sweep"}});
+    assert.ok(started.ok(), "The demo accepted the cleaning command");
+    const pause = page.locator("#overviewPause");
+    await pause.waitFor({state:"visible"});
+    await pause.press("Enter");
     await page.waitForFunction(()=>document.querySelector("#statVacuum .stat-line").textContent.includes("Paused"));
     const advanced = page.locator("#statVacuum [data-i18n='advanced_settings']");
     await advanced.press("Enter");
