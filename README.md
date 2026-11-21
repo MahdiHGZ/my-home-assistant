@@ -37,8 +37,9 @@ python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 ```
 
-The web interface needs **no extra dependencies** — it uses the Python standard
-library only.
+The deployment lock supports CPython 3.11 and 3.12 on Linux. Install a C compiler, Python development headers and Linux input headers for packages that build native extensions. The exported `requirements.txt` installs the locked runtime. With `uv`, use `uv sync --locked --no-dev` for deployment or `uv sync --locked --group llm` for the existing optional model runtime.
+
+Update dependencies by editing `pyproject.toml`, running `uv lock --upgrade`, and regenerating the pip file with `uv export --locked --no-dev --no-emit-project --no-hashes --no-annotate --no-header -o requirements.txt`. Commit both files after the clean-install CI passes.
 
 ### 2. `.env` — device credentials
 
@@ -226,7 +227,7 @@ direction 5 stops all holds, and the server exits remote mode after five idle se
 
 ## Touch-controller wall panel (Optional)
 
-An ESP32-S3 wall-mounted touch panel can display real-time status and trigger actions on the LAN. The firmware in [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) features an Apple-style **Liquid-Glass** design — frosted translucency, a Dynamic Island notification bar, and an ambient background that responds to active bulb colors (see [tuch_controller/DESIGN.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/DESIGN.md) and [tuch_controller/HARDWARE.md](file:///Users/divar/Coukab/coukab_lan/tuch_controller/HARDWARE.md) for wiring and setup).
+An ESP32-S3 wall-mounted touch panel can display real-time status and trigger actions on the LAN. The firmware in [tuch_controller/](tuch_controller) features an Apple-style **Liquid-Glass** design — frosted translucency, a Dynamic Island notification bar, and an ambient background that responds to active bulb colors (see [tuch_controller/DESIGN.md](tuch_controller/DESIGN.md) and [tuch_controller/HARDWARE.md](tuch_controller/HARDWARE.md) for wiring and setup).
 
 It syncs with the backend server via Server-Sent Events (SSE) and requests server-rendered RGB565 images for alert and camera preview rendering.
 
@@ -235,8 +236,7 @@ It syncs with the backend server via Server-Sent Events (SSE) and requests serve
 ## LLM brain — "Khatoon" (optional)
 
 A local, CPU-only LLM that **chats on the web page and controls the house**
-through the same device tools. Model selection for the low-power server is
-documented in [brain_model/model_choice_design.md](file:///Users/divar/Coukab/coukab_lan/brain_model/model_choice_design.md); the chosen model is
+through the same device tools. The configured model for the low-power server is
 **Gemma 4 E2B (QAT, `UD-Q4_K_XL` GGUF, ~2.6 GB)**, run text-only.
 
 Requires `llama-cpp-python` and the GGUF at
@@ -244,6 +244,7 @@ Requires `llama-cpp-python` and the GGUF at
 Download it:
 
 ```bash
+mkdir -p brain_model
 curl -L -o brain_model/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf \
   https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF/resolve/main/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
 ```
@@ -267,9 +268,7 @@ venv/bin/python brain_test.py --list-only
 venv/bin/python brain_test.py --prompt "Check purifier PM2.5 and vacuum battery."
 ```
 
-The system prompt lives in `system.prompt`. The agentic tool protocol and the
-streaming chat endpoint (`/api/chat/stream`) are described in
-[brain_model/model_choice_design.md](file:///Users/divar/Coukab/coukab_lan/brain_model/model_choice_design.md).
+The system prompt lives in [system.prompt](system.prompt). The streaming endpoint is `/api/chat/stream`.
 
 ---
 
@@ -285,20 +284,20 @@ venv/bin/python -m unittest discover -s tests -v
 
 | File / Folder | Role |
 | --- | --- |
-| [main.py](file:///Users/divar/Coukab/coukab_lan/main.py) | Entry point — keypad event loop, action controller, starts the web server |
-| [web_server.py](file:///Users/divar/Coukab/coukab_lan/web_server.py) | Standard-library HTTP server: JSON API + serves the UI |
-| [web/](file:///Users/divar/Coukab/coukab_lan/web) | Front-end web application (index.html, style.css, app.js, PWA manifest, service worker) |
-| [yeelight_bulb_utils.py](file:///Users/divar/Coukab/coukab_lan/yeelight_bulb_utils.py) | Yeelight bulb control, scenes, party dance, discovery |
-| [xiaomi_vacuum_utils.py](file:///Users/divar/Coukab/coukab_lan/xiaomi_vacuum_utils.py) | Xiaomi vacuum (MIoT) control and status |
-| [xiaomi_airpurifier_utils.py](file:///Users/divar/Coukab/coukab_lan/xiaomi_airpurifier_utils.py) | Xiaomi air purifier (MIoT) control and status |
-| [miot_base.py](file:///Users/divar/Coukab/coukab_lan/miot_base.py) | Shared MIoT connection management and caching base class |
-| [tapo_camera_utils.py](file:///Users/divar/Coukab/coukab_lan/tapo_camera_utils.py) | Tapo camera RTSP capture, OpenCV room analysis, and brain tools |
-| [brain.py](file:///Users/divar/Coukab/coukab_lan/brain.py), [brain_test.py](file:///Users/divar/Coukab/coukab_lan/brain_test.py) | Optional local LLM agent, tool calling pipeline, and mock tests |
-| [brain_model/](file:///Users/divar/Coukab/coukab_lan/brain_model) | Contains the Gemma 4 LLM weights and model choice design doc |
-| [tooling.py](file:///Users/divar/Coukab/coukab_lan/tooling.py) | Shared decorators (`@brain_tool`) for registering LLM function tools |
-| [tuch_controller/](file:///Users/divar/Coukab/coukab_lan/tuch_controller) | ESP32-S3 wall touch panel firmware (Liquid-Glass design; see `DESIGN.md` / `HARDWARE.md`) |
-| [tuch_controller_utils.py](file:///Users/divar/Coukab/coukab_lan/tuch_controller_utils.py) | Server-side panel helpers: alerts, RGB565 rendering, status flattening, panel discovery |
-| [moments/](file:///Users/divar/Coukab/coukab_lan/moments) | Captured camera photos (moments) and thumbnails |
+| [main.py](main.py) | Entry point — keypad event loop, action controller, starts the web server |
+| [web_server.py](web_server.py) | Standard-library HTTP server: JSON API + serves the UI |
+| [web/](web) | Front-end web application (index.html, style.css, app.js, PWA manifest, service worker) |
+| [yeelight_bulb_utils.py](yeelight_bulb_utils.py) | Yeelight bulb control, scenes, party dance, discovery |
+| [xiaomi_vacuum_utils.py](xiaomi_vacuum_utils.py) | Xiaomi vacuum (MIoT) control and status |
+| [xiaomi_airpurifier_utils.py](xiaomi_airpurifier_utils.py) | Xiaomi air purifier (MIoT) control and status |
+| [miot_base.py](miot_base.py) | Shared MIoT connection management and caching base class |
+| [tapo_camera_utils.py](tapo_camera_utils.py) | Tapo camera RTSP capture, OpenCV room analysis, and brain tools |
+| [brain.py](brain.py), [brain_test.py](brain_test.py) | Optional local LLM agent, tool calling pipeline, and mock tests |
+| `brain_model/` (created locally) | Contains the Gemma 4 LLM weights and model choice design doc |
+| [tooling.py](tooling.py) | Shared decorators (`@brain_tool`) for registering LLM function tools |
+| [tuch_controller/](tuch_controller) | ESP32-S3 wall touch panel firmware (Liquid-Glass design; see `DESIGN.md` / `HARDWARE.md`) |
+| [tuch_controller_utils.py](tuch_controller_utils.py) | Server-side panel helpers: alerts, RGB565 rendering, status flattening, panel discovery |
+| `moments/` (created on capture) | Captured camera photos (moments) and thumbnails |
 | [GitHub Issues](https://github.com/MahdiHGZ/my-home-assistant/issues) | Project bugs and feature requests, labeled by component and priority |
-| [bulb.json](file:///Users/divar/Coukab/coukab_lan/bulb.json), [.env](file:///Users/divar/Coukab/coukab_lan/.env) | Your device configuration |
-| [coukab-lan.service](file:///Users/divar/Coukab/coukab_lan/coukab-lan.service) | systemd unit |
+| [bulb.json](bulb.json), `.env` (copy [example.env](example.env)) | Your device configuration |
+| [coukab-lan.service](coukab-lan.service) | systemd unit |

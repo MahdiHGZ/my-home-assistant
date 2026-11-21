@@ -10,6 +10,7 @@ tuch_controller/secrets.h
 
 # Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/

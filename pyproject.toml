@@ -13,3 +13,20 @@ ignore_missing_imports = true
 check_untyped_defs = true
 no_implicit_optional = true
 warn_redundant_casts = true
+
+[project]
+name = "coukab-lan"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "evdev", "opencv-python>=4.9,<5", "python-miio", "pytapo",
+    "python-dotenv", "yeelight", "paho-mqtt>=2,<3", "zeroconf",
+]
+
+[dependency-groups]
+dev = ["ruff", "mypy"]
+llm = ["llama-cpp-python"]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'linux'"]

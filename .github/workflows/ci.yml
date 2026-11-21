@@ -6,25 +6,31 @@ on:
 
 jobs:
   python-and-web:
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
           cache: pip
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
       - run: python -m pip install --upgrade pip
-      - run: pip install -r requirements.txt ruff mypy
+      - run: pip install uv==0.13.9
+      - run: uv sync --locked
+      - run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - run: python -c "from miio.miot_device import MiotDevice"
       - run: ruff check .
       - run: mypy miot_base.py tooling.py
-      - run: python -m compileall -q .
+      - run: python -m compileall -q -x "/[.]venv/" .
       - run: python -m unittest discover -s tests -v
       - run: node --check web/app.js
       - run: npm ci --prefix tests/browser
-      - run: node --test tests/browser/dashboard.test.cjs
+      - run: node --test tests/browser/*.test.cjs
 
   firmware-host:
     runs-on: ubuntu-latest
