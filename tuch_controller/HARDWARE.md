@@ -84,7 +84,7 @@ Sketch folder `tuch_controller/` with tabs:
   `Adafruit BusIO`, `XPT2046_Touchscreen`. (`WiFi`, `HTTPClient`,
   `ArduinoOTA`, `Preferences` ship with the core.)
 - After the first USB flash, the panel appears as **network port
-  `coukab-panel`** (Tools → Port) for OTA re-flashing.
+  `coukab-panel`** (Tools → Port) for OTA re-flashing when a non-empty `OTA_PASSWORD` is defined in `secrets.h`. Without it, use USB.
 
 Settings stored in NVS: touch calibration (`tcal`), screen timeout and
 night-mode toggle (`cfg`). They survive re-flashing.

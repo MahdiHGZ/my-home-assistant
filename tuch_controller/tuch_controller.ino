@@ -2217,11 +2217,13 @@ void apiWorkerTask(void* arg) {
       else if (code != -1) serverReachable = false;  // -1 = wifi down, says nothing about the server
       const char* msg = job.okMsg;
       if (!ok) {
-        if (code == 200)      msg = "device offline";
+        if (code == 202)      msg = "action pending";
+        else if (code == 200) msg = "device offline";
         else if (code == -1)  msg = "no wifi";
+        else if (code > 0)    msg = "action failed";
         else                  msg = "server unreachable";
       }
-      pushResult(RES_TOAST, ok, msg, 0);
+      pushResult(RES_TOAST, ok || code == 202, msg, 0);
     } else if (job.type == JOB_STATUS) {  // always deliver so loop() clears its dedupe flag
       String payload = httpGetJson("/api/panel/status", STATUS_TIMEOUT_MS);
       if (payload.length()) serverReachable = true;
@@ -3119,14 +3121,14 @@ void setupWiFi() {
 // One-time init once Wi-Fi is up: NTP (night mode) + OTA.
 void initNetServices() {
   configTime(TZ_OFFSET_SEC, 0, "pool.ntp.org");
-  ArduinoOTA.setHostname(OTA_HOSTNAME);
-  // Optional OTA password: define OTA_PASSWORD in secrets.h to require it.
-  // Reflashing is higher-privilege than the (intentionally open) web API. (§7.7)
 #ifdef OTA_PASSWORD
-  ArduinoOTA.setPassword(OTA_PASSWORD);
+  if (OTA_PASSWORD[0]) {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.begin();
+    Serial.printf("OTA ready as '%s'.\n", OTA_HOSTNAME);
+  }
 #endif
-  ArduinoOTA.begin();
-  Serial.printf("OTA ready as '%s'.\n", OTA_HOSTNAME);
 }
 
 void updateHeaderPeriodically() {
@@ -3219,7 +3221,9 @@ void loop() {
     netReady = true;
     initNetServices();
   }
-  if (netReady) ArduinoOTA.handle();
+#ifdef OTA_PASSWORD
+  if (netReady && OTA_PASSWORD[0]) ArduinoOTA.handle();
+#endif
 
   // Deep-sleep alert poll: once Wi-Fi is up, fetch the alert exactly once. The
   // RES_ALERT handler lights the screen iff it's new and sets alertPollDone;
